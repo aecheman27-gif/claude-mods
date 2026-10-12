@@ -1,0 +1,18 @@
+{
+  "name": "shared-edit-guard",
+  "version": "0.1.0",
+  "description": "Asks before Claude edits a file that another tool (Gemini, an editor, another agent) changed in the last few minutes.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "windowMinutes": {
+      "type": "number",
+      "title": "Recent-change window (minutes)",
+      "description": "An outside change this recent makes Claude ask before editing the file.",
+      "default": 10
+    }
+  }
+}

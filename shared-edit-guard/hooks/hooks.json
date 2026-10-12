@@ -1,0 +1,4 @@
+{
+  "description": "shared-edit-guard: tool.call{Read|Edit|Write|NotebookEdit} (ledger + gate), tool.call{Bash|PowerShell} (own-change windows)",
+  "modules": ["./register.ts"]
+}

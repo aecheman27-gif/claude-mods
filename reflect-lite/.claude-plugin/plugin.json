@@ -1,0 +1,10 @@
+{
+  "name": "reflect-lite",
+  "version": "0.1.0",
+  "description": "When you correct Claude (\"no\", \"don't\", \"I wish\", \"remember: ...\"), a band offers to save it as a rule in CLAUDE.md or a skill. Local phrase matching, no model calls.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

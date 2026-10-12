@@ -1,0 +1,4 @@
+{
+  "description": "git-changes: command.run{changes}, tool.call (refresh after edits and shell commands), turn.complete, ui.render{Pane changes}",
+  "modules": ["./register.tsx"]
+}

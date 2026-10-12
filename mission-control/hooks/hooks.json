@@ -1,0 +1,6 @@
+{
+  "description": "mission-control: ui.render{Spinner|ToolUse|ToolResult|AbovePrompt|Pane ctx}, command.run{clean|ctx}, turn.step (reads effort; overrides it only when no /effort command exists), session.measure",
+  "modules": [
+    "./register.tsx"
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "name": "my-claude-mods",
+  "owner": {
+    "name": "aecheman27-gif"
+  },
+  "plugins": [
+    {
+      "name": "cache-tax",
+      "source": "./cache-tax",
+      "description": "Vendored from github.com/karanb192/cache-tax @ 06cac47 (MIT). Warns before a cold prompt-cache send; /keepwarm."
+    },
+    {
+      "name": "hw-write-guard",
+      "source": "./hw-write-guard",
+      "description": "Asks before code that drives hardware (nidaqmx DO/AO, pymodbus, pyserial, printer MQTT) runs or is written."
+    },
+    {
+      "name": "mission-control",
+      "source": "./mission-control",
+      "description": "Skin: [SYS]/[TOOL]/[EDIT] rows with icons and one status block (in flightdeck under its session log when open, else above the prompt): [SYS] repo, branch, model, hw-guard; [CTL] model and effort buttons; [CTX] context fill with a /ctx pane by tool. /clean checklist view."
+    },
+    {
+      "name": "shared-edit-guard",
+      "source": "./shared-edit-guard",
+      "description": "Asks before Claude edits a file another tool (e.g. Gemini) changed in the last few minutes."
+    },
+    {
+      "name": "reflect-lite",
+      "source": "./reflect-lite",
+      "description": "Offers to save your corrections as rules (CLAUDE.md or a skill). Local matching, no model calls."
+    },
+    {
+      "name": "savvy-progress",
+      "source": "./savvy-progress",
+      "description": "Vendored from github.com/johnnyvizz/claude-kit/plugins/savvy-progress @ 272a877 (MIT). Subagent panel (/agents-info) + progress bar."
+    },
+    {
+      "name": "plan-progress",
+      "source": "./plan-progress",
+      "description": "Vendored from github.com/zycck/claude-mods/plugins/plan-progress @ 3539d02 (MIT). Plan progress bars with subagent strips."
+    },
+    {
+      "name": "flightdeck",
+      "source": "./flightdeck",
+      "description": "Vendored from github.com/scasella/claude-flightdeck @ f31daca (MIT), patched so other mods can draw under its session log. Live pane: subagents, permission verdicts, context, cost."
+    },
+    {
+      "name": "cc-arcade",
+      "source": "./cc-arcade",
+      "description": "Vendored from github.com/sezaakgun/cc-arcade @ 0baff06 (MIT). Games and a pet above the prompt (/arcade)."
+    },
+    {
+      "name": "filetree",
+      "source": "./filetree",
+      "description": "Vendored from github.com/data-goblin/claude-code-filetree @ da1da65 (MIT). Right-side file tree; touched files highlighted, green when committed."
+    },
+    {
+      "name": "redact",
+      "source": "./redact",
+      "description": "Vendored from github.com/karanb192/claude-code-redact/plugins/redact @ 66e80ae (MIT). Swaps secrets in prompts for placeholders; restores them only in file edits."
+    },
+    {
+      "name": "reflect-mod",
+      "source": "./reflect-mod",
+      "description": "Vendored from github.com/BayramAnnakov/claude-reflect/mod @ b6c4232 (MIT). Model-assisted correction capture (Haiku per prompt). Kept disabled; reflect-lite replaces it."
+    },
+    {
+      "name": "git-changes",
+      "source": "./git-changes",
+      "description": "/changes pane: branch, ahead/behind, staged, unstaged, untracked and conflicted files with +/- counts, recent commits. Read-only git."
+    },
+    {
+      "name": "next-steps",
+      "source": "./next-steps",
+      "description": "Claude ends a turn with 2-4 follow-ups as buttons above the prompt; a click sends one."
+    },
+    {
+      "name": "qa-jump",
+      "source": "./qa-jump",
+      "description": "/qa pane: your questions with the start of each answer; click to jump the transcript there."
+    },
+    {
+      "name": "replay-theater",
+      "source": "./replay-theater",
+      "description": "Vendored from anthropic claude-code-playground @ 569c528 (Apache-2.0), patched so its band row stacks above other mods' rows (or sits in flightdeck). Step through last turn's edits (/replay)."
+    },
+    {
+      "name": "blast-radius",
+      "source": "./blast-radius",
+      "description": "Vendored from anthropic claude-code-playground @ 569c528 (Apache-2.0). Holds risky shell commands (rm -rf, git reset --hard, force push, migrations) with Proceed/Cancel."
+    },
+    {
+      "name": "agent-governor",
+      "source": "./agent-governor",
+      "description": "Watches subagents: running count, peak and new tokens per agent in a band row; warns past limits. Hard caps and per-type model routing opt-in (/governor)."
+    },
+    {
+      "name": "checkpoint",
+      "source": "./checkpoint",
+      "description": "Writes a handoff note at every compaction (goal, open tasks, files, errors), asks the summary to keep them, offers Resume in a fresh session. /handoff writes one now."
+    },
+    {
+      "name": "retry-breaker",
+      "source": "./retry-breaker",
+      "description": "Warns when Claude or a subagent fails the same command 3x in a row (busy port, timeout, flaky test). Never blocks."
+    },
+    {
+      "name": "chat-bubbles",
+      "source": "./chat-bubbles",
+      "description": "Vendored from github.com/angeldelbiondo/claude-chat-bubbles @ 5597448 (MIT), patched so the footer keeps other mods' buttons. Messenger-style chat: your prompts in right-side bubbles, Claude in tinted cards, 441 palettes (/bubbles)."
+    }
+  ]
+}

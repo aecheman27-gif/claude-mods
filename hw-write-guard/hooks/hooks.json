@@ -1,0 +1,4 @@
+{
+  "description": "hw-write-guard: tool.call{Bash|PowerShell|Write|Edit|NotebookEdit}, command.run{hw-guard}",
+  "modules": ["./register.ts"]
+}

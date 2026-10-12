@@ -1,0 +1,10 @@
+{
+  "name": "git-changes",
+  "version": "0.1.0",
+  "description": "/changes pane: branch, ahead/behind, staged, unstaged, untracked and conflicted files with +/- line counts, recent commits. Read-only git, refreshed as Claude works.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

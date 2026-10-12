@@ -1,0 +1,4 @@
+{
+  "description": "agent-governor: command.run{governor}, agent.spawn (track, opt-in ask and model routing), turn.step (tokens per agent), turn.complete (agent finished), tool.call (opt-in over-budget deny, agent.list reconcile), ui.render{AbovePrompt}",
+  "modules": ["./register.tsx"]
+}

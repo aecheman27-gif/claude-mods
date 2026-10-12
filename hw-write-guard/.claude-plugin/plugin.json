@@ -1,0 +1,9 @@
+{
+  "name": "hw-write-guard",
+  "version": "0.2.1",
+  "description": "Asks before Claude runs or writes code that drives hardware: nidaqmx DO/AO writes, pymodbus coil/register writes, pyserial writes, MQTT publishes to printer topics.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT"
+}

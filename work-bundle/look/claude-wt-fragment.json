@@ -1,0 +1,51 @@
+{
+  "$help": "https://aka.ms/terminal-documentation",
+  "schemes": [
+    {
+      "name": "Tokyo Night",
+      "background": "#1A1B26",
+      "foreground": "#C0CAF5",
+      "cursorColor": "#C0CAF5",
+      "selectionBackground": "#283457",
+      "black": "#15161E",
+      "red": "#F7768E",
+      "green": "#9ECE6A",
+      "yellow": "#E0AF68",
+      "blue": "#7AA2F7",
+      "purple": "#BB9AF7",
+      "cyan": "#7DCFFF",
+      "white": "#A9B1D6",
+      "brightBlack": "#414868",
+      "brightRed": "#F7768E",
+      "brightGreen": "#9ECE6A",
+      "brightYellow": "#E0AF68",
+      "brightBlue": "#7AA2F7",
+      "brightPurple": "#BB9AF7",
+      "brightCyan": "#7DCFFF",
+      "brightWhite": "#C0CAF5"
+    }
+  ],
+  "profiles": [
+    {
+      "name": "Claude",
+      "commandline": "powershell -NoExit -Command claude",
+      "startingDirectory": "%USERPROFILE%",
+      "icon": "\ud83d\udcac",
+      "tabTitle": "Claude",
+      "suppressApplicationTitle": true,
+      "tabColor": "#7AA2F7",
+      "colorScheme": "Tokyo Night",
+      "font": {
+        "face": "Cascadia Code",
+        "size": 12,
+        "cellHeight": "1.25"
+      },
+      "padding": "28, 20",
+      "scrollbarState": "hidden",
+      "cursorShape": "bar",
+      "opacity": 94,
+      "useAcrylic": true,
+      "bellStyle": "none"
+    }
+  ]
+}

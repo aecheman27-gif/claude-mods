@@ -1,0 +1,10 @@
+{
+  "name": "retry-breaker",
+  "version": "0.1.0",
+  "description": "Warns (never blocks) when Claude or a subagent keeps retrying the same failing command: a toast and a row above the prompt after 3 identical failures in a row.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

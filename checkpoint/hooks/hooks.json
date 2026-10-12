@@ -1,0 +1,4 @@
+{
+  "description": "checkpoint: session.compact (handoff note + keep-instructions), command.run{handoff}, session.start (resume offer), prompt.submit (clears it), ui.render{AbovePrompt}",
+  "modules": ["./register.tsx"]
+}

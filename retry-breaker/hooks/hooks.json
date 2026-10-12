@@ -1,0 +1,4 @@
+{
+  "description": "retry-breaker: tool.call observer (counts identical consecutive failures per loop, never denies), /retry-breaker command, ui.render{AbovePrompt}",
+  "modules": ["./register.tsx"]
+}

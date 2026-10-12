@@ -1,0 +1,10 @@
+{
+  "name": "qa-jump",
+  "version": "0.1.0",
+  "description": "/qa pane: every question you asked this session with the start of Claude's answer; click to jump the transcript to the answer or the question.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

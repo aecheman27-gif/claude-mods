@@ -1,0 +1,10 @@
+{
+  "name": "checkpoint",
+  "version": "0.1.0",
+  "description": "At every compaction, saves a handoff note (goal, open tasks, files, recent errors) to .claude/handoff/ and asks the summary to keep those facts; a later fresh session offers to resume from it. /handoff saves one now. No model calls.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

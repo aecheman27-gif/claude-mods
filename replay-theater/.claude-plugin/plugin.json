@@ -1,0 +1,9 @@
+{
+  "name": "replay-theater",
+  "version": "0.1.0-mc.2",
+  "description": "Replay Theater: step through the file edits Claude made in the last turn, one diff at a time. (Vendored from anthropic claude-code-playground @ 569c528, patched so its band row stacks above other mods' rows, and sits under flightdeck's session log while that pane is open.)",
+  "author": {
+    "name": "Claude Code DevRel"
+  },
+  "license": "Apache-2.0"
+}

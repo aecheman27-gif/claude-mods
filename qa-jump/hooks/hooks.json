@@ -1,0 +1,4 @@
+{
+  "description": "qa-jump: session.append{prompt,response} (records row ids), ui.render{Pane qa}, command.run{qa}",
+  "modules": ["./register.tsx"]
+}

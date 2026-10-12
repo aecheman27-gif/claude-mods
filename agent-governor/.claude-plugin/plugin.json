@@ -1,0 +1,10 @@
+{
+  "name": "agent-governor",
+  "version": "0.1.0",
+  "description": "Watches subagents in long, fan-out-heavy sessions: a [GOV] band while agents run (count, peak, tokens) and a toast when too many run at once or an agent or the session goes over its token budget. Warn-only by default; /governor caps on asks before over-limit spawns and stops over-budget agents, /governor route picks a model per agent type.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

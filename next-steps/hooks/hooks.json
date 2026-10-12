@@ -1,0 +1,4 @@
+{
+  "description": "next-steps: tool next_steps, prompt.compose (one-line hint), prompt.submit (clears the card), ui.render{AbovePrompt}",
+  "modules": ["./register.tsx"]
+}

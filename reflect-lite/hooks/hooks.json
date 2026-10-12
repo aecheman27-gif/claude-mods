@@ -1,0 +1,4 @@
+{
+  "description": "reflect-lite: prompt.submit (local correction match), ui.render{AbovePrompt}",
+  "modules": ["./register.tsx"]
+}
