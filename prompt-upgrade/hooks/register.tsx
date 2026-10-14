@@ -3,7 +3,7 @@ import type { EngineInterface, ModelCompleteResult, Register } from 'claude-code
 
 import type { Question, Upgrade } from '../types'
 
-// /upgrade <prompt> opens a pane: the model asks 2-4 multiple-choice questions
+// /improve <prompt> opens a pane: the model asks 2-4 multiple-choice questions
 // about the prompt, the person picks, and the model writes a fuller prompt from
 // the answers, to run, edit in the prompt box, or copy. Two $.model.complete
 // calls per upgrade, only when asked: prompts sent normally are never touched.
@@ -147,20 +147,20 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'upgrade',
+      name: 'improve',
       description: 'Prompt upgrade: answer a few questions, get a fuller prompt to run, edit or copy (no text: your last prompt)',
       argumentHint: '<your prompt>',
     })
     return next(e)
   })
 
-  on('command.run', { command: 'upgrade' }, async ($, e) => {
+  on('command.run', { command: 'improve' }, async ($, e) => {
     const typed = String(e.args ?? '').trim()
     const original = typed || (await lastPrompt($))
-    if (!original) return { text: 'Usage: /upgrade <your prompt>. With nothing after it, /upgrade takes your last prompt.' }
+    if (!original) return { text: 'Usage: /improve <your prompt>. With nothing after it, /improve takes your last prompt.' }
     void begin($, original)
     return { text: `Prompt upgrade: reading ${typed ? 'your prompt' : 'your last prompt'}. Answer its questions in the pane.` }
-  }).catch(() => ({ text: 'Prompt upgrade could not start: your last prompt could not be read. Try /upgrade <your prompt>.' }))
+  }).catch(() => ({ text: 'Prompt upgrade could not start: your last prompt could not be read. Try /improve <your prompt>.' }))
 
   // the person closed the pane: drop the run and its view
   on('ui.close', async ($, e, next) => {
@@ -177,7 +177,7 @@ export const register: Register = (on, options) => {
     // the mobile app draws no text field: there the questions alone shape the rewrite
     const Input = 'Input' in els ? els.Input : undefined
     const v = await read($, view)
-    if (!v) return <Text dimColor>{'Nothing to upgrade. /upgrade <your prompt> starts one.'}</Text>
+    if (!v) return <Text dimColor>{'Nothing to upgrade. /improve <your prompt> starts one.'}</Text>
     const cols = e.props.bodyColumns ?? 80
     const set = (fn: (x: Upgrade) => Upgrade) => void update($, view, x => (x ? fn(x) : x))
     const typed = (

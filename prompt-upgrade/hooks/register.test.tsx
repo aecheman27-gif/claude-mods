@@ -72,7 +72,7 @@ function world(on: On, replies: unknown[]): World {
 const answer = (text: string) => ({ isAnswered: true, text, usage: { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
 const start = ($: Engine) => $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true } as never)
 const upgrade = ($: Engine, args: string) =>
-  $.command.run({ command: 'upgrade', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as CommandRunInput)
+  $.command.run({ command: 'improve', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as CommandRunInput)
 const pane = (columns: number): RenderPropsOf['Pane'] =>
   ({ title: 'Prompt upgrade', isFocused: true, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} }) as never
 const mount = ($: Engine, columns = 120) => $.ui.mount({ plugin: 'prompt-upgrade', surface: 'terminal', component: 'Pane', requestId: 'prompt-upgrade', props: pane(columns) })

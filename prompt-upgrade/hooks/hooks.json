@@ -1,4 +1,4 @@
 {
-  "description": "prompt-upgrade: /upgrade command, two $.model.complete calls (questions, rewrite), ui.render{Pane} with Select/Input fields, ui.close",
+  "description": "prompt-upgrade: /improve command, two $.model.complete calls (questions, rewrite), ui.render{Pane} with option buttons and an Input, ui.close",
   "modules": ["./register.tsx"]
 }

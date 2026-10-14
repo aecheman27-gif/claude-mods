@@ -117,7 +117,7 @@
     {
       "name": "prompt-upgrade",
       "source": "./prompt-upgrade",
-      "description": "/upgrade <prompt>: clickable questions in a pane, then a fuller prompt to run, edit or copy. Two small model calls per use, only when asked."
+      "description": "/improve <prompt>: clickable questions in a pane, then a fuller prompt to run, edit or copy. Two small model calls per use, only when asked."
     },
     {
       "name": "todays-report",
