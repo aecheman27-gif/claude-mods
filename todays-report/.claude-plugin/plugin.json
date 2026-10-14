@@ -1,0 +1,26 @@
+{
+  "name": "todays-report",
+  "version": "0.1.0",
+  "description": "/report: tasks Claude finished today, this week, month or year, the time it worked, what the work was, which models did it, the API-equivalent cost, your streak, and an estimate of time saved at a rate you set. Counted locally, no model calls.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "minutesPerTask": {
+      "type": "number",
+      "title": "Minutes saved per task",
+      "description": "How long one finished task would take you by hand, on average. The report's time saved is tasks × this; it is your estimate, not a measurement.",
+      "default": 10,
+      "min": 0
+    },
+    "hourlyRate": {
+      "type": "number",
+      "title": "Your hourly rate ($)",
+      "description": "What an hour of your time is worth. The report's value is time saved × this.",
+      "default": 50,
+      "min": 0
+    }
+  }
+}

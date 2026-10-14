@@ -1,0 +1,4 @@
+{
+  "description": "auto-model: prompt.submit + turn.start (tier per prompt, local rules), turn.step (main loop's model and effort for that turn), turn.complete, /automodel command, ui.render{AbovePrompt} redo row",
+  "modules": ["./register.tsx"]
+}

@@ -108,6 +108,21 @@
       "name": "chat-bubbles",
       "source": "./chat-bubbles",
       "description": "Vendored from github.com/angeldelbiondo/claude-chat-bubbles @ 5597448 (MIT), patched so the footer keeps other mods' buttons. Messenger-style chat: your prompts in right-side bubbles, Claude in tinted cards, 441 palettes (/bubbles)."
+    },
+    {
+      "name": "auto-model",
+      "source": "./auto-model",
+      "description": "Picks the model per prompt with local rules (no model calls): quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus, only while the context is small. [AUTO] row with Redo; /automodel."
+    },
+    {
+      "name": "prompt-upgrade",
+      "source": "./prompt-upgrade",
+      "description": "/upgrade <prompt>: clickable questions in a pane, then a fuller prompt to run, edit or copy. Two small model calls per use, only when asked."
+    },
+    {
+      "name": "todays-report",
+      "source": "./todays-report",
+      "description": "/report: tasks Claude finished today, week, month or year, time worked, kinds of work, models, API-equivalent cost, streak, and an estimate of time saved at your rate. Local counts, no model calls."
     }
   ]
 }

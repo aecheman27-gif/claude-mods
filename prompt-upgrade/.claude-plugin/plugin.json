@@ -1,0 +1,18 @@
+{
+  "name": "prompt-upgrade",
+  "version": "0.1.0",
+  "description": "/upgrade <prompt>: a pane asks 2-4 clickable questions about what you want, then writes a fuller prompt you can run, edit or copy. Two small model calls per upgrade, only when you ask.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "model": {
+      "type": "string",
+      "title": "Model for questions and rewrite",
+      "description": "The model prompt-upgrade asks for its questions and writes the upgraded prompt with: an alias (haiku, sonnet, opus) or a full model id.",
+      "default": "sonnet"
+    }
+  }
+}

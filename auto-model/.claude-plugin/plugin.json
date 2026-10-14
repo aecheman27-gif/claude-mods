@@ -1,0 +1,19 @@
+{
+  "name": "auto-model",
+  "version": "0.1.0",
+  "description": "Picks the model per prompt with local rules: quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus. Switches only while the context is small, so the prompt cache isn't wasted.",
+  "author": {
+    "name": "aecheman27-gif"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "switchUnderTokens": {
+      "type": "number",
+      "title": "Switch only under (tokens of context)",
+      "description": "auto-model changes the model only while the conversation is under this many tokens. A switch re-reads the whole conversation on the other model's empty cache, which costs more than it saves on a long chat.",
+      "default": 50000,
+      "min": 0
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "description": "todays-report: turn.start/turn.complete and tool.call observers (never change anything) totalled per day in $.store, /report command, ui.render{Pane}",
+  "modules": ["./register.tsx"]
+}
