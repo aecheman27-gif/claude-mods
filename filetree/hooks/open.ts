@@ -23,18 +23,34 @@ export const LINUX_OPEN = [
 ].join('\n')
 
 const WIN_OPEN = "$ErrorActionPreference = 'Stop'; [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{ FileName = $env:PANE_OPEN_TARGET; UseShellExecute = $true }) | Out-Null"
+// A file Windows' default action would run opens in Notepad (a script) or is shown in Explorer (the rest), never with that action.
+const WIN_EDIT = "$ErrorActionPreference = 'Stop'; [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{ FileName = (Join-Path $env:SystemRoot 'System32\\notepad.exe'); Arguments = [char]34 + $env:PANE_OPEN_TARGET + [char]34; UseShellExecute = $true }) | Out-Null"
+const WIN_REVEAL = "$ErrorActionPreference = 'Stop'; [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{ FileName = (Join-Path $env:SystemRoot 'explorer.exe'); Arguments = '/select,' + [char]34 + $env:PANE_OPEN_TARGET + [char]34; UseShellExecute = $true }) | Out-Null"
+const WIN_SCRIPTS = new Set(['bat', 'cmd', 'ps1', 'psm1', 'psd1', 'psc1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh', 'wsc', 'ws', 'sct', 'hta', 'reg', 'py', 'pyw', 'sh', 'bash', 'pl', 'rb', 'php', 'tcl', 'ahk', 'au3'])
+const WIN_PROGRAMS = new Set(['exe', 'com', 'scr', 'cpl', 'pif', 'msi', 'msp', 'mst', 'msc', 'msix', 'msixbundle', 'appx', 'appxbundle', 'appinstaller', 'application', 'appref-ms', 'gadget', 'lnk', 'url', 'website', 'scf', 'jar', 'pyc', 'pyo', 'pyz', 'chm', 'diagcab', 'xbap', 'xll', 'settingcontent-ms', 'library-ms', 'search-ms', 'searchconnector-ms'])
+const URL_TARGET = /^[a-z][a-z0-9+.-]*:\/\//i
 
-export function openCommand(os: 'linux' | 'darwin' | 'win32', target: string) {
+export function winOpener(target: string, pathext = ''): 'open' | 'edit' | 'reveal' {
+  if (URL_TARGET.test(target)) return 'open'
+  const name = (target.split(/[\\/]/).pop() ?? '').replace(/[. ]+$/, '')
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
+  if (!ext) return 'open'
+  if (WIN_PROGRAMS.has(ext)) return 'reveal'
+  return WIN_SCRIPTS.has(ext) || pathext.toLowerCase().split(';').includes(`.${ext}`) ? 'edit' : 'open'
+}
+
+export function openCommand(os: 'linux' | 'darwin' | 'win32', target: string, pathext = '') {
+  const how = os === 'win32' ? winOpener(target, pathext) : 'open'
   const argv = os === 'linux'
     ? ['sh', '-c', LINUX_LAUNCH, 'sh', 'sh', '-c', LINUX_OPEN, 'sh', target]
     : os === 'darwin'
       ? ['open', '--', target]
-      : ['powershell', '-NoProfile', '-NonInteractive', '-Command', WIN_OPEN]
+      : ['powershell', '-NoProfile', '-NonInteractive', '-Command', how === 'edit' ? WIN_EDIT : how === 'reveal' ? WIN_REVEAL : WIN_OPEN]
   return {
     argv,
     init: {
       timeoutMs: 10_000,
-      ...(os === 'win32' ? { env: { PANE_OPEN_TARGET: /^[a-z][a-z0-9+.-]*:\/\//i.test(target) ? target : target.replace(/\//g, '\\') } } : {}),
+      ...(os === 'win32' ? { env: { PANE_OPEN_TARGET: URL_TARGET.test(target) ? target : target.replace(/\//g, '\\') } } : {}),
     },
   }
 }

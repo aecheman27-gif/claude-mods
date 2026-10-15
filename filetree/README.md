@@ -52,13 +52,14 @@ Installed it as `filetree@filetree` before the repository was renamed? Nothing t
 
   <img src="media/filetree-git.gif" alt="A committed file shimmers green and the footer shows the commit" width="800">
 
-- Selection-aware: the selected file is passed to Claude as context through a `prompt.submit` hook, and `@path` mentions in a prompt reveal that file in the tree
+- Selection-aware: the file you select is passed to Claude as context with the next prompt you send, through a `prompt.submit` hook, and `@path` mentions in a prompt reveal that file in the tree
 
   <img src="media/filetree-ask.gif" alt="Selecting config.yaml in the tree and asking Claude what it changed there" width="800">
 
 - File and folder sizes: the `Σ` header button swaps the date column for sizes; folders show their disk usage (`du`, or a summed listing on Windows), worked out in the background for the rows on screen and refreshed after Claude writes
-- Double-click a file to open it in its default app
-- Click to select, arrow keys to move through the tree
+- Double-click (or Ctrl/Shift-click) a file to open it in its default app; on Windows a file that app would run (a script, program, installer or shortcut) opens in Notepad or is shown in Explorer instead
+- Click to select, arrow keys to move through the tree; Enter and Space select a file or fold a folder, and never open anything
+- Closing the pane keeps it closed, across sessions, until you run `/filetree`
 - Light on large repos: outside a repo it only checks once whether one exists, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
 - On Omarchy, the pane takes its colors and background from the current theme and follows theme switches

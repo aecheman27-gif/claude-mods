@@ -20,6 +20,7 @@ type World = {
   du?: Record<string, string>
   duDelays?: number[]
   links?: string[]
+  store?: Record<string, unknown>
 }
 type Ran = string[][]
 const opens: unknown[] = []
@@ -28,7 +29,7 @@ const envs: Record<string, string>[] = []
 function world(on: any, w: World, ran: Ran) {
   mock.env(on, w.env)
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  mock.store(on)
+  mock.store(on, w.store)
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: w.cwd }))
   on('session.id', () => ({ value: 'test-session' }))
@@ -135,7 +136,7 @@ test('macOS Claude Code app: desktop pane draws, selects, opens with open', { ti
   await ui.post({ press: `${root}/README.md` }, { in: 'rows' })
   await clock.settle()
   expect(await texts(ui)).toContain('"selected: ","README.md"')
-  const sent = await $.prompt.submit({ text: 'what is this?', wait: false } as any)
+  const sent = await $.prompt.submit({ text: 'what is this?', wait: false, origin: { kind: 'composer' } } as any)
   expect(JSON.stringify(sent)).toContain(`${root}/README.md`)
   await ui.post({ press: `${root}/README.md` }, { in: 'rows' })
   await clock.settle()
@@ -846,3 +847,130 @@ for (const os of ['linux', 'win32'] as const) {
     await ui.unmount()
   })
 }
+
+test('Windows: Enter never opens a file; a script opens in Notepad and a program is shown in Explorer, never run', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = 'C:/lab/rig'
+  const clock = world(on, {
+    os: 'win32', env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\k', PATHEXT: '.COM;.EXE;.BAT;.CMD;.PY' }, cwd: root, top: '',
+    dirs: { [root]: [['run.py', 'file'], ['setup.exe', 'file'], ['notes.txt', 'file']] }, status: '', numstat: '',
+  }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const openers = () => ran.filter(a => a[0] === 'powershell').map(a => a.at(-1) ?? '')
+  await ui.post({ press: `${root}/run.py` }, { in: 'rows' })
+  await clock.advance(1_000)
+  await ui.post({ key: 'return' }, { in: 'rows' })
+  await clock.settle()
+  expect(openers()).toEqual([])
+  expect(await texts(ui)).toContain('"selected: ","run.py"')
+  await ui.post({ press: `${root}/run.py` }, { in: 'rows' })
+  await ui.post({ press: `${root}/run.py` }, { in: 'rows' })
+  await clock.settle()
+  expect(openers().length).toBe(1)
+  expect(openers()[0]).toContain('notepad.exe')
+  expect(envs.at(-1)).toEqual({ PANE_OPEN_TARGET: 'C:\\lab\\rig\\run.py' })
+  await ui.post({ press: `${root}/setup.exe`, ctrl: true }, { in: 'rows' })
+  await clock.settle()
+  expect(openers()[1]).toContain('explorer.exe')
+  await clock.advance(1_000)
+  await ui.post({ press: `${root}/notes.txt` }, { in: 'rows' })
+  await ui.post({ press: `${root}/notes.txt` }, { in: 'rows' })
+  await clock.settle()
+  expect(openers()[2]).toContain('UseShellExecute = $true')
+  expect(openers()[2]).not.toMatch(/notepad|explorer/)
+  await ui.unmount()
+})
+
+test('a PowerShell command refreshes the tree, git status and git activity like a Bash one', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = 'C:/Users/k/proj'
+  const w: World = { os: 'win32', env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\k' }, cwd: root, top: root, dirs: { [root]: [['a.txt', 'file'], ['b.txt', 'file']] }, status: '## main\0', numstat: '', heads: ['1111111aaaa', '2222222bbbb'] }
+  const clock = world(on, w, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  expect(await texts(ui)).toContain(`"id":"${root}/a.txt"`)
+  const statuses = () => ran.filter(a => a[0] === 'git' && a.includes('status')).length
+  const before = statuses()
+  w.dirs[root] = [['b.txt', 'file']]
+  await $.tool.call({ tool: 'PowerShell', command: 'Remove-Item a.txt' } as any)
+  await clock.settle()
+  expect(statuses()).toBeGreaterThan(before)
+  expect(await texts(ui)).not.toContain(`"id":"${root}/a.txt"`)
+  await $.tool.call({ tool: 'PowerShell', command: 'git commit -m "fix"' } as any)
+  await clock.settle()
+  expect(await texts(ui)).toContain('committed')
+  await ui.unmount()
+})
+
+test('the selected file is context for the next prompt the person sends, not every later one', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await ui.post({ press: `${root}/a.txt` }, { in: 'rows' })
+  await clock.settle()
+  const send = async (text: string, origin: object = { kind: 'composer' }) => JSON.stringify(await $.prompt.submit({ text, wait: false, origin } as any))
+  expect(await send('<task-notification>done</task-notification>', { kind: 'task-notification' })).not.toContain(`${root}/a.txt`)
+  expect(await send('what is this?')).toContain(`${root}/a.txt`)
+  expect(await send('now something else entirely')).not.toContain(`${root}/a.txt`)
+  await clock.advance(1_000)
+  await ui.post({ press: `${root}/a.txt` }, { in: 'rows' })
+  await clock.settle()
+  expect(await send('and fix it', { kind: 'plugin', name: 'next-steps', asUser: true })).toContain(`${root}/a.txt`)
+  await ui.unmount()
+})
+
+test('many untracked folders never overflow the git command line', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const names = Array.from({ length: 1_200 }, (_, i) => `untracked-instrument-capture-folder-${i}`)
+  const clock = world(on, {
+    os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root,
+    dirs: { [root]: names.map(n => [n, 'dir'] as [string, 'dir']), [`${root}/${names[0]}`]: [['x.csv', 'file']] },
+    status: `## main\0${names.map(n => `?? ${n}/\0`).join('')}`, numstat: '',
+  }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const gits = ran.filter(a => a[0] === 'git')
+  expect(gits.some(a => a.includes('ls-files'))).toBe(true)
+  expect(Math.max(...gits.map(a => a.join(' ').length))).toBeLessThan(32_000)
+  expect(await texts(ui)).toContain(' ?:1')
+  await ui.unmount()
+})
+
+// The kit's `$` raises no `ui.close`, so the person's close is the mark it
+// leaves in the store; a session (or a hot reload) starts with it there.
+test('a pane the person closed stays closed until /filetree', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const a = '/home/k/repo-a'
+  const b = '/home/k/repo-b'
+  const w: World = { os: 'linux', env: { HOME: '/home/k' }, cwd: a, top: '', dirs: { [a]: [['a.txt', 'file']], [b]: [['b.txt', 'file']] }, status: '', numstat: '', store: { paneClosed: true } }
+  const clock = world(on, w, ran)
+  on('classic.CwdChanged', () => ({}))
+  on('classic.SessionStart', () => ({}))
+  const before = opens.length
+  await $.session.start({ cwd: a, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  w.cwd = b
+  await $.classic.CwdChanged({ old_cwd: a, new_cwd: b } as any)
+  await clock.settle()
+  await $.classic.SessionStart({ source: 'resume', cwd: b } as any)
+  await clock.settle()
+  expect(opens.length).toBe(before)
+  await $.command.run(fullscreen(''))
+  await clock.settle()
+  expect(opens.length).toBe(before + 1)
+  w.cwd = a
+  await $.classic.CwdChanged({ old_cwd: b, new_cwd: a } as any)
+  await clock.settle()
+  expect(opens.length).toBe(before + 2)
+})

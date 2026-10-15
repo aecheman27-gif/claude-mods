@@ -24,6 +24,13 @@ const start = ($: Engine) => $.session.start({ cwd: 'C:/work', surface: 'termina
 const text = (t: string) => [{ type: 'text', text: t }]
 const ask = ($: Engine, uuid: string, t: string, kind = 'composer', extra: object = {}) =>
   $.session.append({ uuid, door: 'prompt', origin: { kind }, message: { type: 'user', role: 'user', content: text(t), ...extra } } as never)
+const askAs = ($: Engine, uuid: string, t: string, origin: object) =>
+  $.session.append({ uuid, door: 'prompt', origin, message: { type: 'user', role: 'user', content: text(t) } } as never)
+// A prompt typed while Claude works, folded into the running turn as the engine frames it.
+const midTurn = (t: string) =>
+  text(`<system-reminder>\nThe user sent a new message while you were working:\n${t}\n\nThis is how Claude Code surfaces messages the user sends mid-turn. Address the message above as you continue this turn.\n</system-reminder>`)
+const deliver = ($: Engine, uuid: string, content: unknown[], kind = 'composer') =>
+  $.session.append({ uuid, door: 'delivery', origin: { kind }, message: { type: 'attachment', name: 'queued_command', role: 'user', content } } as never)
 const reply = ($: Engine, uuid: string, content: unknown[], agentId?: string) =>
   $.session.append({ uuid, door: 'response', origin: { kind: 'model', model: 'm' }, message: { type: 'assistant', role: 'assistant', content }, ...(agentId ? { agentId } : {}) } as never)
 const toolUse = [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }]
@@ -116,6 +123,36 @@ describe('questions', () => {
     await ask($, 'u2', 'and now?')
     await reply($, 'a4', text('Now it builds.'))
     expect(await textOf(ui)).toContain('↳ Now it builds.')
+  })
+
+  test('a question typed while Claude works is its own question: the rows after it answer it', async ($, on) => {
+    world(on)
+    await start($)
+    await ask($, 'u1', 'run the bench test')
+    await reply($, 'a1', text('Starting the bench run.'))
+    await deliver($, 'q1', midTurn('also log the supply voltage'))
+    await reply($, 'a2', text('Logging the supply voltage too.'))
+    await deliver($, 'n1', text('<task-notification>capture finished</task-notification>'), 'task-notification')
+    await reply($, 'a3', text('Capture finished with the voltage logged.'))
+    const t = await textOf(await mountPane($))
+    expect(t).toMatch(/ 2\s*also log the supply voltage/)
+    expect(t).not.toContain('while you were working')
+    expect(t).not.toContain('capture finished')
+    expect(t).toContain('↳ Starting the bench run.')
+    expect(t).toContain('↳ Capture finished with the voltage logged.')
+  })
+
+  test("a prompt another mod sends as the person's own words is a question", async ($, on) => {
+    world(on)
+    await start($)
+    await ask($, 'u1', 'why is the DAQ dropping samples?')
+    await reply($, 'a1', text('The buffer is too small.'))
+    await askAs($, 'u2', 'Increase the buffer size', { kind: 'plugin', name: 'next-steps', asUser: true })
+    await reply($, 'a2', text('Raised it to 64k samples.'))
+    const t = await textOf(await mountPane($))
+    expect(t).toMatch(/ 2\s*Increase the buffer size/)
+    expect(t).toContain('↳ The buffer is too small.')
+    expect(t).toContain('↳ Raised it to 64k samples.')
   })
 
   test('/qa opens the pane', async ($, on) => {

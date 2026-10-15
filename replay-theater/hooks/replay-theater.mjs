@@ -17,9 +17,15 @@ const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
 // turn's steps, the ones the pane shows.
 const state = { pending: [], replay: [], index: 0, isOpen: false, inBand: false, turns: 0 };
 
+// Modified for my-claude-mods: either slash separates, and a Windows cwd (a
+// drive letter or \\server) matches whatever the case.
 function relPath(cwd, path) {
   if (!path) return "(unknown file)";
-  if (cwd && path.startsWith(cwd + "/")) return path.slice(cwd.length + 1);
+  const base = (cwd || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const full = path.replace(/\\/g, "/");
+  const head = full.slice(0, base.length);
+  const isSame = /^([A-Za-z]:|\/\/)/.test(base) ? head.toLowerCase() === base.toLowerCase() : head === base;
+  if (base && full[base.length] === "/" && isSame) return path.slice(base.length + 1);
   return path;
 }
 

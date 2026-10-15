@@ -1,4 +1,4 @@
-import { type BuiltinToolResults, type EngineInterface, type Register, type Timer, update } from 'claude-code'
+import { type BuiltinToolResults, type EngineInterface, type PromptOrigin, type Register, type Timer, update } from 'claude-code'
 import { openCommand } from './open'
 
 import type { Activity, FileNode, FileTree, Theme } from '../types'
@@ -36,6 +36,7 @@ const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
 const PANE = 'filetree'
+const CLOSED = 'paneClosed'
 const SHIMMER = Object.fromEntries(Object.entries(TONES).map(([k, v]) => [k, { bright: v.bright, dim: v.dim }]))
 const BRANCH_ROW = '#branch'
 const FLASH_MS = 2700
@@ -92,6 +93,7 @@ let dirty: { root: string; files: Record<string, Change> } = { root: '', files: 
 let markId = 0
 let listSeq = 0
 let lastRoot = ''
+let offerSelection = false
 let sizeDefault = false
 let sizeEpoch = 0
 let sizeActive = 0
@@ -224,8 +226,9 @@ async function readGit($: EngineInterface): Promise<void> {
     if (head.exitCode === 0) parseNumstat(head.stdout, root, t.prefix, diff)
     const files = { ...parsed.files }
     if (parsed.untrackedDirs.length) {
-      const others = await git($, root, ['ls-files', '-o', '--exclude-standard', '-z', '--', ...parsed.untrackedDirs.map(d => d.slice(root.length + 1) || '.')])
-      if (others.exitCode === 0) for (const rel of others.stdout.split('\0').filter(Boolean)) files[join(root, rel)] = 'new'
+      const untracked = new Set(parsed.untrackedDirs)
+      const others = await git($, root, ['ls-files', '-o', '--exclude-standard', '-z', '--', '.'])
+      if (others.exitCode === 0) for (const path of others.stdout.split('\0').filter(Boolean).map(rel => join(root, rel))) if (underAny(path, untracked, root)) files[path] = 'new'
     }
     for (const path of Object.keys(diff)) if (files[path] === 'new') delete diff[path]
     dirty = { root, files }
@@ -261,6 +264,10 @@ function refreshGit($: EngineInterface): Promise<void> {
   return gitNext
 }
 
+async function closedByPerson($: EngineInterface): Promise<boolean> {
+  return (await $.store.get(CLOSED)) === true
+}
+
 async function reset($: EngineInterface, root: string, focus = false): Promise<void> {
   const prev = await get($)
   generation += 1
@@ -273,7 +280,7 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   await put($, () => ({ ...emptyTree(root), showHidden: prev.showHidden, showSize: prev.root ? prev.showSize : sizeDefault }))
   const title = `Files: ${root.split('/').pop() || root}`
   if (focus) await $.ui.open({ id: PANE, title, focus: true })
-  else if (!noDock) await $.ui.open({ id: PANE, title })
+  else if (!noDock && !(await closedByPerson($))) await $.ui.open({ id: PANE, title })
   await loadDirs($, [root])
   await detectRepo($)
   await refreshGit($)
@@ -871,7 +878,8 @@ async function finePointerOk($: EngineInterface): Promise<boolean> {
 }
 
 async function openFile($: EngineInterface, path: string): Promise<void> {
-  const { argv, init } = openCommand(await osName($), path)
+  const os = await osName($)
+  const { argv, init } = openCommand(os, path, os === 'win32' ? ((await $.env.get('PATHEXT')) ?? '') : '')
   try {
     const run = await $.process.run(argv, init)
     if (run.exitCode !== 0) $.ui.toast(`could not open ${path} with ${argv[0]}: ${run.stderr.trim().split('\n')[0] || `exit ${run.exitCode}`}`)
@@ -880,7 +888,12 @@ async function openFile($: EngineInterface, path: string): Promise<void> {
   }
 }
 
+function byPerson(origin: PromptOrigin): boolean {
+  return origin.kind === 'composer' || origin.kind === 'bridge' || (origin.kind === 'plugin' && origin.asUser === true)
+}
+
 async function toggle($: EngineInterface, n: FileNode): Promise<void> {
+  if (n.kind !== 'dir') offerSelection = true
   if (n.kind === 'dir' && !(await get($)).expanded.includes(n.id)) await loadDirs($, [n.id])
   await patch($, t => {
     const open = new Set(t.expanded)
@@ -955,7 +968,7 @@ export const register: Register = (on, options) => {
       await setActivities($, cur => cur.map(a => (a.state === 'running' ? { ...a, state: 'failed', label: `${a.kind} interrupted` } : a)))
       const cwd = await cwdOf($)
       if (!t.root || t.nodes.length === 0 || (follow && t.root !== cwd)) await reset($, cwd)
-      else if (!noDock) await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
+      else if (!noDock && !(await closedByPerson($))) await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
     })()
     return next(e)
   })
@@ -964,6 +977,7 @@ export const register: Register = (on, options) => {
     if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
     if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
     noDock = false
+    await $.store.delete(CLOSED)
     const arg = (e.args ?? '').trim()
     const cwd = await cwdOf($)
     follow = !arg
@@ -972,13 +986,20 @@ export const register: Register = (on, options) => {
     return { text: `File tree on ${shortPath(root)}${follow ? ' (follows the cwd)' : ''}.` }
   })
 
+  on('ui.close', { id: PANE, origin: { kind: 'person' } }, async ($, e, next) => {
+    const result = await next(e)
+    await $.store.set(CLOSED, true)
+    return result
+  }).catch(($, e, next) => next(e))
+
   on('tool.call', async ($, e, next) => {
-    if (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit' && e.tool !== 'Bash') return next(e)
-    const command = e.tool === 'Bash' ? e.command : ''
-    const cwd = e.tool === 'Bash' ? await cwdOf($) : ''
+    if (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit' && e.tool !== 'Bash' && e.tool !== 'PowerShell') return next(e)
+    const shell = e.tool === 'Bash' || e.tool === 'PowerShell'
+    const command = shell ? e.command : ''
+    const cwd = shell ? await cwdOf($) : ''
     const actions = gitActions(command)
     const quiet = !actions.length && readOnly(command)
-    const since = await sinceNow($, e.tool === 'Bash' && !quiet)
+    const since = await sinceNow($, shell && !quiet)
     const before = actions.some(a => a.verb === 'commit') ? await get($) : null
     const head = before?.top ? await headOf($, before.root) : ''
     const pending: Pending | null = actions.length ? { actions, ids: await startGit($, actions), command, head } : null
@@ -994,11 +1015,11 @@ export const register: Register = (on, options) => {
       const ids = pending.ids
       void setActivities($, cur => cur.filter(a => !ids.includes(a.id)))
     }
-    if (result.deny || (result.isError && e.tool !== 'Bash')) {
+    if (result.deny || (result.isError && !shell)) {
       if (since.mark) void $.process.run(['rm', '-f', since.mark], { timeoutMs: 3_000 }).catch(() => undefined)
       return result
     }
-    if (e.tool === 'Bash') {
+    if (shell) {
       const out: Partial<BuiltinToolResults['Bash']> = !result.isError && result.result && typeof result.result === 'object' ? result.result : {}
       const reads = showReads ? readTargets(command, cwd, typeof out.stdout === 'string' ? out.stdout : '', home) : []
       const job: Job = { actions: [], since, initRepo: actions.some(a => a.init), readOnly: quiet || result.isReadOnly === true }
@@ -1070,8 +1091,7 @@ export const register: Register = (on, options) => {
     else if (cur && (data.key === 'left' || data.key === 'h')) {
       if (cur.kind === 'dir' && t.expanded.includes(cur.id)) await toggle($, cur)
       else if (cur.parent !== t.root) await patch($, () => ({ cursor: cur.parent }))
-    } else if (cur && data.key === 'return') await (cur.kind !== 'dir' ? openNode($, cur) : toggle($, cur))
-    else if (cur && data.key === ' ') await toggle($, cur)
+    } else if (cur && (data.key === 'return' || data.key === ' ')) await toggle($, cur)
     return {}
   })
 
@@ -1119,7 +1139,10 @@ export const register: Register = (on, options) => {
     if (!(await followCwd($))) void sync($)
     const t = await get($)
     const context = [...(e.context ?? [])]
-    if (t.selected && (await exists($, t.selected))) context.push(`The user has this file selected in the file tree; "this" or "it" in the prompt likely refers to it: ${t.selected}`)
+    if (offerSelection && t.selected && byPerson(e.origin)) {
+      offerSelection = false
+      if (await exists($, t.selected)) context.push(`The user has this file selected in the file tree; "this" or "it" in the prompt likely refers to it: ${t.selected}`)
+    }
     const mentions = [...e.text.matchAll(/@([^\s"'`]+)/g)]
       .map(m => (m[1] ?? '').replace(/[.,;:!?)]+$/, ''))
       .filter(Boolean)

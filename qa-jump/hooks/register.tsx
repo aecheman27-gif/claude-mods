@@ -25,6 +25,15 @@ const oneLine = (text: string, max: number) => {
   return t.length > max ? t.slice(0, Math.max(1, max - 1)) + '…' : t
 }
 
+/** Typed (composer), sent from a phone (bridge), or sent for the person by another mod's button (`asUser`). */
+const byPerson = (origin: { kind: string; asUser?: boolean }) => HUMAN.has(origin.kind) || (origin.kind === 'plugin' && origin.asUser === true)
+
+/** A prompt folded into a running turn, out of the engine's framing around it. */
+const folded = (text: string) => {
+  const body = text.replace(/<\/?system-reminder>/g, '').trim()
+  return /^The user sent [^\n]*:\n([\s\S]*?)(?:\n\nThis is how Claude Code surfaces[\s\S]*)?$/.exec(body)?.[1]?.trim() ?? body
+}
+
 /** The transcript row a press scrolls to: the answer where it lands (else where it starts), or the question. */
 export const targetOf = (x: Entry, to: 'answer' | 'ask'): string | undefined => (to === 'ask' ? x.id : (x.answerId ?? x.firstAnswerId))
 
@@ -54,25 +63,31 @@ export const register: Register = on => {
 
   // A prompt you typed starts an entry; the response rows after it are its
   // answer: the first one opens it, the last one with text is where it lands.
+  // One typed while Claude works is folded into the running turn (a
+  // `queued_command` row by the delivery door) and starts an entry the same way.
   // A prompt nobody typed (a task notification, a plugin, another agent) closes
   // it: what answers that prompt isn't the answer to yours.
-  on('session.append', { door: ['prompt', 'response'] }, async ($, e, next) => {
+  on('session.append', { door: ['prompt', 'response', 'delivery'] }, async ($, e, next) => {
     const kept = await next(e)
     if (e.agentId) return kept
     const text = e.message.content
       .map(b => (b.type === 'text' ? b.text : ''))
       .join('\n')
       .trim()
-    if (e.door === 'prompt') {
-      if (!HUMAN.has(e.origin.kind)) {
-        await update($, entries, list => {
-          const last = list.at(-1)
-          return !last || last.isClosed ? list : [...list.slice(0, -1), { ...last, isClosed: true }]
-        })
+    if (e.door !== 'response') {
+      const isFolded = e.door === 'delivery'
+      if (isFolded && e.message.name !== 'queued_command') return kept
+      if (!byPerson(e.origin)) {
+        if (!isFolded)
+          await update($, entries, list => {
+            const last = list.at(-1)
+            return !last || last.isClosed ? list : [...list.slice(0, -1), { ...last, isClosed: true }]
+          })
         return kept
       }
-      if (e.message.isMeta || !text || text.startsWith('/')) return kept
-      await update($, entries, list => [...list, { n: (list.at(-1)?.n ?? 0) + 1, id: e.uuid, question: oneLine(text, 200) }].slice(-KEEP))
+      const asked = isFolded ? folded(text) : text
+      if (e.message.isMeta || !asked || asked.startsWith('/')) return kept
+      await update($, entries, list => [...list, { n: (list.at(-1)?.n ?? 0) + 1, id: e.uuid, question: oneLine(asked, 200) }].slice(-KEEP))
     } else {
       await update($, entries, list => {
         const last = list.at(-1)

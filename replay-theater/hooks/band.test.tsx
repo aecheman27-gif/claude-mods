@@ -5,10 +5,10 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, RenderPropsOf } from 'claude-code'
 
-function world(on: On, opts: { isPlaced?: boolean } = {}) {
+function world(on: On, opts: { isPlaced?: boolean; cwd?: string } = {}) {
   const clock = mock.clock(on)
-  on('session.start', async () => ({ cwd: 'C:/work' }) as never)
-  on('session.cwd', async () => ({ value: 'C:/work' }) as never)
+  on('session.start', async () => ({ cwd: opts.cwd ?? 'C:/work' }) as never)
+  on('session.cwd', async () => ({ value: opts.cwd ?? 'C:/work' }) as never)
   on('command.register', async ($, e) => ({ value: { command: e.name } }) as never)
   on('fs.exists', async () => ({ value: true }) as never)
   on('fs.read', async () => ({ value: 'old line\n' }) as never)
@@ -152,6 +152,20 @@ describe('recording', () => {
     expect(text).toContain('Write · rewrite · first 400 lines')
     expect(text).toContain('+400')
     expect(text).toContain('389 more lines') // 1 old + 400 new, 12 shown
+  })
+
+  test('a Windows path shows relative to the cwd whatever its slashes and drive-letter case', async ($, on) => {
+    const { clock } = world(on, { cwd: 'C:\\Work' })
+    await start($)
+    await turn($, [edit('', { file_path: 'c:\\work\\src\\a.txt' }), edit('', { file_path: 'C:/Work/b.txt' }), edit('', { file_path: 'C:\\Workshop\\c.txt' })])
+    await replay($, clock)
+    const ui = await mountPane($)
+    const file = async () => (await ui.find({ type: 'Text', text: /\.txt$/ }))?.text
+    expect(await file()).toBe('src\\a.txt')
+    await ui.press({ key: 'next' })
+    expect(await file()).toBe('b.txt')
+    await ui.press({ key: 'next' })
+    expect(await file()).toBe('C:\\Workshop\\c.txt')
   })
 
   test('a long turn keeps the newest 200 steps', async ($, on) => {
