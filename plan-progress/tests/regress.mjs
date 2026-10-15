@@ -206,7 +206,9 @@ const C = {
     for (let i = 0; i < 3; i++) await E.work('Edit')
     const bash = await E.work('Bash', false)
     const edit = await E.work('Edit')
-    return [`bash ${bash.deny ? 'denied' : 'ran'}, 4th edit ${edit.deny ? 'denied' : 'ran'}`, !bash.deny && !!edit.deny]
+    // the 4th edit is never refused (another plugin may have asked the person about it); it carries a reminder
+    const nudged = (edit.context ?? []).some(c => c.includes('Create a bar'))
+    return [`bash ${bash.deny ? 'denied' : 'ran'}, 4th edit ${edit.deny ? 'denied' : 'ran'}, nudged ${nudged}`, !bash.deny && !edit.deny && nudged]
   },
   async T25b_shell_not_counted(E) {
     await E.turnStart()

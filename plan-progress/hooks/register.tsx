@@ -256,10 +256,6 @@ function parsePlan(markdown: string, now: number): Plan | null {
   return { id: PLAN_ID, title: title || 'Plan', kind: stages.length === 1 ? 'todo' : 'plan', stages, state: 'running', note: null, startedAt: now }
 }
 
-function st(title: string, s: StepStatus): PlanStep {
-  return { title, status: s, substeps: [] }
-}
-
 // ---------- drawing ----------
 
 type Where = { pos: number; total: number; stage: number; step: number; stageSize: number }
@@ -1243,17 +1239,21 @@ async function animate($: EngineInterface) {
 
 // ---------- engine glue ----------
 
-// the engine's player first (afplay on macOS); PowerShell where it cannot play
-// set while a demo reel records: every sound with its moment, so a video can carry them
-let soundLog: { at: number; name: string }[] | null = null
+// Modified for my-claude-mods: sounds play while both the sounds option in /config and /progress-sounds (kept in the
+// store, on by default) are on
+const SOUNDS = 'sounds'
+let isSoundOption = true
+let isSoundOn = true
 
+// the engine's player first (afplay on macOS); PowerShell where it cannot play
 function play($: EngineInterface, name: 'decision' | 'error' | 'done') {
-  if (soundLog) void $.clock.now().then(at => soundLog?.push({ at, name }))
+  if (!isSoundOption || !isSoundOn) return
   const file = `${$.plugin.root}/sounds/${name}.wav`.replace(/\//g, '\\')
-  // the path goes in through the environment: written into the command, a quote in it (C:\Users\O'Brien) ends the string
+  // the path goes in through the environment: written into the command, a quote in it (C:\Users\O'Brien) ends the string.
+  // No execution policy flag: it governs script files, and -Command runs none
   const viaPowerShell = () =>
     $.process
-      .run(['powershell', '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '(New-Object Media.SoundPlayer $env:PLAN_PROGRESS_WAV).PlaySync()'], {
+      .run(['powershell', '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '(New-Object Media.SoundPlayer $env:PLAN_PROGRESS_WAV).PlaySync()'], {
         env: { PLAN_PROGRESS_WAV: file },
         timeoutMs: 5000,
       })
@@ -1415,7 +1415,9 @@ async function editAgent($: EngineInterface, agentId: string, change: (a: AgentR
 // tasks it created), or reported through the progress_step tool, which a short line in its prompt asks for while
 // /progress-agent-steps is on (kept in the store, on by default)
 const STEP_TOOL = 'mcp__plan-progress__progress_step'
-const STEP_LINE = `Progress: after planning, call ${STEP_TOOL} with total (your 3-8 steps) and done 0, then again as each step finishes (load it with ToolSearch first if it is deferred); if you keep a todo list instead, that is counted automatically.`
+// every subagent type gets it, some with no ToolSearch or MCP tools at all, so it asks only where the tool is there,
+// and for a handful of calls
+const STEP_LINE = `Progress: only if the ${STEP_TOOL} tool is available (load it with ToolSearch if it is deferred), call it once after planning with total (your 3-8 steps) and done 0, then once as each step finishes, not per tool call; a todo list you keep counts instead.`
 const AGENT_STEPS = 'agentSteps'
 let isAgentSteps = true
 // the tasks each agent created, by task id: what TaskUpdate calls change
@@ -1513,16 +1515,8 @@ const STEP_SCHEMA = {
 // plain reads (ls) read-only, so a compound read (cd x && git log) would look like work and be refused
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
-const WORK_BEFORE_PLAN = 3 // the 4th edit without a plan is refused once
+const WORK_BEFORE_PLAN = 3 // the 4th edit without a plan carries a reminder to open one, once
 const CALLS_BEFORE_NUDGE = 6 // edits without a plan update before a reminder
-
-
-
-// ---------- demo reel: two pipelines and their agents, ~13 s, for screen recordings ----------
-const run = (id: string, title: string, tool: string, at: number, isSonnet: boolean): AgentRun => ({
-  id, title, state: 'running', tool, startedAt: at, endedAt: null, depth: 0,
-  ...(isSonnet ? { model: 'claude-sonnet-5-5', effort: 'medium' } : { model: 'claude-haiku-4-5' }),
-})
 
 // $.state lives as long as the process, so the bars are kept per session in the plugin's store as well
 const SAVED = 'plans:'
@@ -1553,114 +1547,36 @@ async function restorePlans($: EngineInterface) {
   lastSaved = list
 }
 
-async function runReel($: EngineInterface, logPath: string) {
-  const t0 = await $.clock.now()
-  soundLog = []
-  foldUntil = t0 + 20_000
-  await update($, plans, () => [])
-  const A = 'reel-checkout'
-  const B = 'reel-release'
-  const steps = (names: string[], active: number) => names.map((n, i) => st(n, i < active ? 'done' : i === active ? 'active' : 'pending'))
-  // mid-run the checkout plan is rewritten: a Harden stage lands between Build and Verify
-  let isReplanned = false
-  const planA = (k: number, state: PlanState = 'running'): Plan => {
-    const all = isReplanned
-      ? ['Routes', 'Cart store', 'Payment API', 'Webhooks', 'Checkout UI', 'Rate limits', 'Security review', 'Tests', 'Build']
-      : ['Routes', 'Cart store', 'Payment API', 'Webhooks', 'Checkout UI', 'Tests', 'Build']
-    const s2 = steps(all, k)
-    const stages = isReplanned
-      ? [{ name: 'Explore', steps: s2.slice(0, 2) }, { name: 'Build', steps: s2.slice(2, 5) }, { name: 'Harden', steps: s2.slice(5, 7) }, { name: 'Verify', steps: s2.slice(7) }]
-      : [{ name: 'Explore', steps: s2.slice(0, 2) }, { name: 'Build', steps: s2.slice(2, 5) }, { name: 'Verify', steps: s2.slice(5) }]
-    return { id: A, title: 'Checkout flow', kind: 'plan', state, note: null, startedAt: t0, stages }
-  }
-  const planB = (k: number, state: PlanState = 'running'): Plan =>
-    ({ id: B, title: 'Release notes', kind: 'todo', state, note: null, startedAt: t0, stages: [{ name: 'Release', steps: steps(['Collect PRs', 'Group changes', 'Draft notes', 'Publish'], k) }] })
-  const setAgents = async (id: string, f: (a: AgentRun[]) => AgentRun[]) => {
-    const now = await $.clock.now()
-    await update($, plans, list => list.map(p => (p.id === id ? syncAuto({ ...p, agents: f(p.agents ?? []) }, now) : p)))
-  }
-  const edit = (id: string, agentId: string, ch: Partial<AgentRun>, at: number) =>
-    setAgents(id, list => list.map(a => (a.id === agentId ? { ...a, ...ch, ...(ch.state === 'done' || ch.state === 'error' ? { endedAt: at } : {}) } : a)))
-  const keep = async (id: string, f: (p: Plan) => Plan) => {
-    let before: PlanState | undefined
-    let after: PlanState | undefined
-    const now = await $.clock.now()
-    await update($, plans, list =>
-      list.map(p => {
-        if (p.id !== id) return p
-        before = p.state
-        const made = f(p)
-        // a finished bar shows its time in the pill, so it needs the moment it ended
-        const next = { ...made, endedAt: made.state === 'done' ? now : null, agents: p.agents, agentsDoneAt: p.agentsDoneAt }
-        after = next.state
-        return next
-      }),
-    )
-    if (after) chime($, before, after)
-  }
-
-  // agent events: [ms, bar, agent id, title or change]
-  type Ev = [number, string, string, string | Partial<AgentRun>]
-  const ev: Ev[] = [
-    [0, A, 'a1', 'Map payment routes'], [0, A, 'a2', 'Read cart store'], [0, A, 'a3', 'Scan checkout tests'], [0, A, 'a4', 'Trace tax rules'],
-    [0, A, 'a5', 'List webhooks'], [300, B, 'b1', 'Collect merged PRs'], [300, B, 'b2', 'Group by area'], [300, B, 'b3', 'Find breaking changes'],
-    [300, B, 'b4', 'Check migrations'], [900, A, 'a1', { tool: 'Read' }], [1100, B, 'b1', { tool: 'Bash' }], [1500, A, 'a2', { state: 'done' }],
-    [2000, B, 'b2', { tool: 'Grep' }], [2200, A, 'a4', { tool: 'Grep' }], [2400, B, 'b1', { state: 'done' }],
-    [2800, A, 'a1', { state: 'done' }], [3200, B, 'b3', { tool: 'Read' }],
-    [3500, A, 'a3', { state: 'waiting', tool: 'Needs approval' }], [4100, B, 'b2', { state: 'done' }],
-    [4400, A, 'a5', { state: 'done' }], [4700, B, 'b4', { state: 'done' }], [5000, A, 'a3', { state: 'running', tool: 'Bash' }],
-    [5600, B, 'b5', 'Draft release notes'], [6000, A, 'a3', { state: 'error' }], [6600, B, 'b3', { state: 'done' }], [7000, A, 'a6', 'Fix webhook retry'], [7600, A, 'a4', { state: 'done' }],
-    [8000, B, 'b5', { tool: 'Write' }], [8400, A, 'a6', { tool: 'Bash' }], [9000, B, 'b5', { state: 'done' }], [10200, A, 'a6', { state: 'done' }],
-  ]
-  const script: [number, () => Promise<unknown>][] = [
-    [0, async () => {
-      await putPlan($, planA(0))
-      await putPlan($, planB(0))
-    }],
-    ...ev.map(([at, bar, id, x]): [number, () => Promise<unknown>] => [
-      at,
-      () => (typeof x === 'string' ? setAgents(bar, list => [...list, run(id, x, ['Glob', 'Read', 'Grep'][list.length % 3] ?? 'Read', t0 + at, list.length % 3 === 1)]) : edit(bar, id, x, t0 + at)),
-    ]),
-    [1600, () => keep(A, () => planA(1))], [2500, () => keep(B, () => planB(1))], [3500, () => keep(A, p => ({ ...planA(2), state: 'needs_input', note: 'Run payment tests?' }))],
-    [5000, () => keep(A, () => planA(3))], [5700, () => keep(B, () => planB(2))],
-    [6000, () => keep(A, () => ({ ...planA(5), state: 'error', note: '2 tests failed' }))],
-    [7000, () => keep(A, () => { isReplanned = true; return planA(5) })], [8200, () => keep(B, () => planB(3))],
-    [8800, () => keep(A, () => planA(7))],
-    [9100, () => keep(B, () => planB(4, 'done'))], [10400, () => keep(A, () => planA(9, 'done'))],
-    [13500, async () => {
-      await $.fs.write(logPath, JSON.stringify({ t0, sounds: soundLog }))
-      soundLog = null
-    }],
-  ]
-  for (const [at, step] of script) $.clock.after(at, () => void step())
-}
-
 export const register: Register = (on, options) => {
   const seconds = Number(options?.doneBarSeconds ?? 30)
   doneStaysMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 30_000
+  isSoundOption = options?.sounds !== false
 
   // per-turn bookkeeping; module variables are fine here, a reload just starts a fresh count
   let workCalls = 0
   let sinceUpdate = 0
-  let isPlanTouched = false
-  let hasRefused = false
+  // the bars the main loop moved this turn: the ones Stop holds it to
+  const touched = new Set<string>()
+  let hasNudged = false
   let isWaitingOnBackground = false
 
   on('turn.start', async ($, e, next) => {
     isTurnLive = true
     workCalls = 0
     sinceUpdate = 0
-    isPlanTouched = false
-    hasRefused = false
+    touched.clear()
+    hasNudged = false
     isWaitingOnBackground = false
 
     return next(e)
   })
 
   // the rule lives in the cached system prompt; a message only carries one short line when bars are open,
-  // and the person answering clears any "needs input" without a model call
+  // and the person answering clears any "needs input" without a model call. Modified for my-claude-mods: typed,
+  // sent through Remote Control, or a plugin's button sending the person's words (asUser)
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind !== 'composer') return next(e)
+    const o = e.origin
+    if (o.kind !== 'composer' && o.kind !== 'bridge' && !(o.kind === 'plugin' && o.asUser === true)) return next(e)
     const list = await read($, plans)
     if (list.some(p => p.state === 'needs_input')) {
       await update($, plans, all => all.map(p => (p.state === 'needs_input' ? { ...p, state: 'running' as const, note: null } : p)))
@@ -1677,8 +1593,9 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), line] })
   })
 
-  // watches the main loop's changing calls: refuses once when multi-step work starts without a bar,
-  // and reminds to update the bar when it goes stale mid-turn
+  // Modified for my-claude-mods: watches the main loop's changing calls: reminds once when multi-step work starts
+  // without a bar, and reminds to update the bar when it goes stale mid-turn. Never a refusal: another plugin's
+  // guard may already have asked the person about this very call, and a refusal would ask them again on the retry
   on('tool.call', async ($, e, next) => {
     // a subagent's call only names its current tool on its strip; no gate, no reminders
     if (e.agentId) {
@@ -1708,16 +1625,16 @@ export const register: Register = (on, options) => {
     if (!EDIT_TOOLS.has(e.tool)) return next(e)
     isWaitingOnBackground = false
     const open = (await read($, plans)).filter(isOpenPlan)
-    const hasLivePlan = isPlanTouched || open.length > 0
-    if (!hasLivePlan && !hasRefused && workCalls >= WORK_BEFORE_PLAN) {
-      hasRefused = true
-
-      return { deny: `plan-progress: several changes ahead. Create a bar with ${TOOL} first, then retry.` }
-    }
+    const hasLivePlan = touched.size > 0 || open.length > 0
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
     workCalls += 1
     sinceUpdate += 1
+    if (!hasLivePlan && !hasNudged && workCalls > WORK_BEFORE_PLAN) {
+      hasNudged = true
+
+      return { ...ran, context: [...(ran.context ?? []), `plan-progress: several changes and no bar. Create a bar with ${TOOL} now, before the next change.`] }
+    }
     if (hasLivePlan && sinceUpdate >= CALLS_BEFORE_NUDGE) {
       sinceUpdate = 0
       const ids = open.map(p => p.id).join(', ') || 'the bar'
@@ -1729,10 +1646,12 @@ export const register: Register = (on, options) => {
   })
 
   // an open bar at the end of a turn: a question to the user marks it waiting on its own;
-  // only a turn that did work and left the bar unexplained is sent back once
+  // only a turn that moved a bar itself and left it unexplained is sent back once. A turn waiting on background
+  // work, or on a /loop or wakeup that checks back later, is not done yet
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    if (e.stop_hook_active || result.block || isWaitingOnBackground || (e.background_tasks?.length ?? 0) > 0) return result
+    const isWaiting = isWaitingOnBackground || (e.background_tasks?.length ?? 0) > 0 || (e.session_crons?.length ?? 0) > 0
+    if (e.stop_hook_active || result.block || isWaiting) return result
     const open = (await read($, plans)).filter(isOpenPlan)
     if (open.length === 0) return result
     const asks = /\?\s*$/.test(e.last_assistant_message ?? '')
@@ -1742,11 +1661,12 @@ export const register: Register = (on, options) => {
 
       return result
     }
-    if (workCalls === 0 && !isPlanTouched) return result
+    const mine = open.filter(p => touched.has(p.id))
+    if (mine.length === 0) return result
 
     return {
       ...result,
-      block: `plan-progress: ${open.map(p => p.id).join(', ')} still open. Update each with ${TOOL}: {id, next:true}, or state "done", "needs_input" or "error" with a note.`,
+      block: `plan-progress: ${mine.map(p => p.id).join(', ')} still open. Update each with ${TOOL}: {id, next:true}, or state "done", "needs_input" or "error" with a note.`,
     }
   })
 
@@ -1829,9 +1749,11 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'plan-progress-autoclose', description: 'Turn on or off finished bars leaving on their own' })
     // Modified for my-claude-mods
     await $.command.register({ name: 'progress-agent-steps', description: 'on|off: ask subagents to report their step counts on their strips' })
+    await $.command.register({ name: 'progress-sounds', description: 'on|off: the decision, error and done sounds' })
     isAutoClose = (await $.store.get(AUTOCLOSE)) !== false
     // Modified for my-claude-mods
     isAgentSteps = (await $.store.get(AGENT_STEPS)) !== false
+    isSoundOn = (await $.store.get(SOUNDS)) !== false
 
     return next(e)
   })
@@ -1846,10 +1768,6 @@ export const register: Register = (on, options) => {
     const raw = e as unknown as Raw
     const now = await $.clock.now()
     const id = slug(str(raw.id, 60) || str(raw.title, 80))
-    if (id === 'reel' && typeof raw.note === 'string') {
-      await runReel($, raw.note)
-      return { result: 'reel started' }
-    }
     const next = await editPlan(
       $,
       id,
@@ -1860,7 +1778,8 @@ export const register: Register = (on, options) => {
       Boolean(e.agentId),
     )
     if (typeof next === 'string') return { deny: next }
-    isPlanTouched = true
+    // Modified for my-claude-mods: a subagent's call moves the bar, not the main loop's turn
+    if (!e.agentId) touched.add(id)
     sinceUpdate = 0
     const w = where(next)
     const active = next.state === 'done' ? undefined : next.stages.flatMap(st => st.steps).find(st => st.status === 'active')
@@ -1903,8 +1822,12 @@ export const register: Register = (on, options) => {
     const text = (ran.result as { plan?: unknown } | undefined)?.plan
     const parsed = typeof text === 'string' ? parsePlan(text, await $.clock.now()) : null
     if (!parsed) return ran
+    // Modified for my-claude-mods: only the same plan still under way carries its finished steps and its start; an
+    // older plan bar is history
     await editPlan($, PLAN_ID, prev =>
-      prev ? { ...parsed, stages: pointAt(carryDone(parsed.stages, prev.stages)), startedAt: prev.startedAt } : { ...parsed, stages: pointAt(parsed.stages) },
+      prev && prev.state === 'running' && same(prev.title, parsed.title)
+        ? { ...parsed, stages: pointAt(carryDone(parsed.stages, prev.stages)), startedAt: prev.startedAt }
+        : { ...parsed, stages: pointAt(parsed.stages) },
     )
 
     // the model learns which bar holds its plan, so it moves that one rather than opening its own
@@ -1954,6 +1877,22 @@ export const register: Register = (on, options) => {
       text: isAgentSteps
         ? 'New subagents are asked to report their steps; strips show done/total and a percent.'
         : 'Subagents are no longer asked to report steps; a todo list they keep is still counted.',
+    }
+  })
+
+  // Modified for my-claude-mods: on|off, kept in the store; no argument flips it. The sounds option in /config can
+  // still keep them all quiet
+  on('command.run', { command: 'progress-sounds' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    if (arg !== '' && arg !== 'on' && arg !== 'off') return { text: 'Usage: /progress-sounds on|off' }
+    isSoundOn = arg === '' ? !isSoundOn : arg === 'on'
+    await $.store.set(SOUNDS, isSoundOn)
+    if (!isSoundOn) return { text: 'Progress sounds off; /progress-sounds on brings them back.' }
+
+    return {
+      text: isSoundOption
+        ? 'Progress sounds on: decision, error and done.'
+        : 'Progress sounds on here, but the plan-progress sounds option in /config is off, so none play.',
     }
   })
 

@@ -805,7 +805,7 @@ export const register: Register = (on, options) => {
               ...a,
               model,
               effort: typeof e.effort === 'string' ? e.effort : a.effort,
-              status: 'running',
+              status: 'running' as const,
               endedAt: undefined,
               contextTokens:
                 (usage.input_tokens || 0) +
@@ -838,7 +838,7 @@ export const register: Register = (on, options) => {
           const fallback = a.steps === 0 && e.usage
           return {
             ...a,
-            status: e.reason === 'answer' ? 'done' : 'failed',
+            status: e.reason === 'answer' ? ('done' as const) : ('failed' as const),
             endedAt: at,
             ...(fallback && e.usage
               ? {
@@ -1045,36 +1045,49 @@ export const register: Register = (on, options) => {
       />
     )
 
+    let row
     if ('Svg' in ui) {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
-      return (
+      row = (
         <Box flexDirection="row" alignItems="center" gap={1}>
           <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
           {crewButton}
           {dismiss}
         </Box>
       )
+    } else {
+      const cols = e.props.bodyColumns
+      const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
+      const width = Math.max(6, Math.min(40, cols - titleW - 32))
+      row = (
+        <Box flexDirection="row" gap={2}>
+          <Box width={titleW} flexShrink={0}>
+            <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
+            <Text wrap="truncate-end">{f.title}</Text>
+          </Box>
+          <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
+          <Text bold>{label(f)}</Text>
+          <Text dimColor>{percent}</Text>
+          <Text color={CLAY}>▣</Text>
+          {crewButton}
+          {dismiss}
+        </Box>
+      )
     }
 
-    const cols = e.props.bodyColumns
-    const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
-    const width = Math.max(6, Math.min(40, cols - titleW - 32))
-    return (
-      <Box flexDirection="row" gap={2}>
-        <Box width={titleW} flexShrink={0}>
-          <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
-          <Text wrap="truncate-end">{f.title}</Text>
-        </Box>
-        <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
-        <Text bold>{label(f)}</Text>
-        <Text dimColor>{percent}</Text>
-        <Text color={CLAY}>▣</Text>
-        {crewButton}
-        {dismiss}
+    // The band is shared: what the host and the other mods draw here stays,
+    // under this row. Asked last, so a slow hook below cannot land an older draw.
+    const below = await next(e)
+    return below ? (
+      <Box flexDirection="column" gap={1}>
+        {row}
+        {below}
       </Box>
+    ) : (
+      row
     )
   })
 }

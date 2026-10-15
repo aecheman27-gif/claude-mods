@@ -24,7 +24,7 @@ A plan approved in plan mode lands on the bar `plan`; move that one.
 
 The result says `done/total, state, active step`; no need to check the bar.
 
-User commands: `/progress` toggles the bars, `/progress-clear` removes them, `/progress-agents` folds or shows the agent strips (on the desktop and in the fullscreen terminal each bar with strips also has a fold button), `/plan-progress-autoclose` turns off or on a finished bar leaving on its own after `doneBarSeconds` (30 s by default). The **Progress** button in the footer is always shown while the mod is loaded.
+User commands: `/progress` toggles the bars, `/progress-clear` removes them, `/progress-agents` folds or shows the agent strips (on the desktop and in the fullscreen terminal each bar with strips also has a fold button), `/plan-progress-autoclose` turns off or on a finished bar leaving on its own after `doneBarSeconds` (30 s by default), `/progress-sounds on|off` turns the decision, error and done sounds on or off (also the `sounds` option in /config; either one off silences them). The **Progress** button in the footer is always shown while the mod is loaded.
 
 <!-- Modified for my-claude-mods -->
 Agent steps: a subagent's strip shows `done/total · NN%` from its todo list (TodoWrite, TaskCreate/TaskUpdate) or its `progress_step` calls (`{done, total, note?}`, subagents only); the bar's pill adds the share of all reported steps. `/progress-agent-steps on|off` controls the one line added to subagent prompts asking them to report (on by default).

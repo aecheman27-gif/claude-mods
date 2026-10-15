@@ -1,6 +1,6 @@
 {
   "name": "plan-progress",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Live plan progress bars above the Claude Code prompt: stages, steps, a pixel fill and soft sounds for decision, error and done",
   "author": {
     "name": "Kirill Serditov",
@@ -14,6 +14,12 @@
       "description": "Seconds a finished bar stays above the prompt while /plan-progress-autoclose is on",
       "default": 30,
       "min": 1
+    },
+    "sounds": {
+      "type": "boolean",
+      "title": "Sounds",
+      "description": "Play the decision, error and done sounds; /progress-sounds off also silences them",
+      "default": true
     }
   },
   "types": "./types/index.d.ts"
