@@ -1,8 +1,8 @@
 /* @jsx h */
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 import { pickAuto, pickRandom, type AutoContext } from './games/auto.ts'
 import { isBetter } from './games/best.ts'
-import { feed, level, newPet, petEvent, repairPet, stage, type Pet } from './games/pet.ts'
+import { feed, level, newPet, petEvent, repairPet, stage, type Pet, type PetEvent } from './games/pet.ts'
 
 // One command, /arcade. With no argument it shows a picker above the prompt; `/arcade <game>` starts
 // a game, `random` picks one, `auto` picks one for the moment, `list` prints them, `stop` closes.
@@ -48,6 +48,24 @@ let pet: Pet | undefined
 // is mended by repairPet, keeping its xp, and stored again
 const isPet = (value: unknown): value is Pet =>
   typeof value === 'object' && value !== null && [(value as Pet).xp, (value as Pet).mood, (value as Pet).at, (value as Pet).born].every(Number.isFinite)
+// the pet is re-read from the store first, so sessions running side by side feed the same pet instead
+// of overwriting it; a store that cannot be read is not written over, as this session's copy may be
+// behind another's, and that one feed is skipped
+async function feedPet($: EngineInterface, event: PetEvent) {
+  const read = await $.store.get('pet').then(value => ({ value }), () => undefined)
+  if (!read) return
+  const now = await $.clock.now()
+  const current = repairPet(read.value, now) ?? pet ?? newPet(now)
+  const fed = feed(current, event, now)
+  pet = fed
+  await $.store.set('pet', fed).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
+  if (level(fed.xp) > level(current.xp)) {
+    const grew = stage(fed.xp) !== stage(current.xp) ? `, and is now ${stage(fed.xp) === 'adult' ? 'an adult' : `a ${stage(fed.xp)}`}` : ''
+    $.ui.toast(`pet: reached level ${level(fed.xp)}${grew}`)
+  }
+  if (active === 'pet') $.ui.invalidate('ui.render')
+}
+
 const autoContext = (now: number): AutoContext => ({
   working: turnStartedAt !== undefined,
   turnMs: turnStartedAt === undefined ? 0 : now - turnStartedAt,
@@ -62,10 +80,11 @@ export const register: Register = on => {
     // a store that cannot be read or written costs the pet and the scores, never the games:
     // an unhandled rejection here would unmount the whole module
     const stored = (key: string) => $.store.get(key).catch(err => { $.ui.log(`cc-arcade: store read failed: ${err}`); return undefined })
-    const saved = await stored('pet')
+    const read = await $.store.get('pet').then(value => ({ value }), err => { $.ui.log(`cc-arcade: store read failed: ${err}`); return undefined })
     const now = await $.clock.now()
-    pet = repairPet(saved, now) ?? newPet(now)
-    if (!isPet(saved)) await $.store.set('pet', pet).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
+    pet = repairPet(read?.value, now) ?? newPet(now)
+    // a store that could not be read may still hold a good pet: only what was read back is written over
+    if (read && !isPet(read.value)) await $.store.set('pet', pet).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
     for (const name of NAMES) {
       const score = Number(await stored(`best:${name}`))
       if (score) best[name] = score
@@ -139,24 +158,14 @@ export const register: Register = on => {
     return r
   })
 
-  // the pet feeds on work: a test run passing or failing, a commit, an edit. It is re-read from the
-  // store first, so sessions running side by side feed the same pet instead of overwriting it.
+  // the pet feeds on work: a test run passing or failing, a commit, an edit
   on('tool.call', async ($, e, next) => {
     const r = await next(e)
     const command = (e as { command?: unknown }).command
     const event = petEvent(e.tool, typeof command === 'string' ? command : undefined, 'deny' in r ? undefined : !r.isError)
     if (!event) return r
-    const saved = await $.store.get('pet').catch(() => undefined)
-    const now = await $.clock.now()
-    const current = repairPet(saved, now) ?? pet ?? newPet(now)
-    const fed = feed(current, event, now)
-    pet = fed
-    await $.store.set('pet', fed).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
-    if (level(fed.xp) > level(current.xp)) {
-      const grew = stage(fed.xp) !== stage(current.xp) ? `, and is now ${stage(fed.xp) === 'adult' ? 'an adult' : `a ${stage(fed.xp)}`}` : ''
-      $.ui.toast(`pet: reached level ${level(fed.xp)}${grew}`)
-    }
-    if (active === 'pet') $.ui.invalidate('ui.render')
+    // feeding the pet never fails the tool call it watched
+    await feedPet($, event).catch(err => $.ui.log(`cc-arcade: pet not fed: ${err}`))
     return r
   })
 

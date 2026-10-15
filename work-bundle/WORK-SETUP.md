@@ -1,6 +1,6 @@
 # my-claude-mods: setup guide for Claude Code at work
 
-This bundle is a personal set of Claude Code mods, built and tested on **Claude Code 2.1.295 through 2.1.300, Windows 11**.
+This bundle is a personal set of Claude Code mods, built and tested on **Claude Code 2.1.295 through 2.1.301, Windows 11**.
 It is written for the Claude that installs it. Read it whole before running anything.
 
 ## Ground rules
@@ -11,7 +11,7 @@ It is written for the Claude that installs it. Read it whole before running anyt
 - **Never install anything that downloads code at runtime.** None of these mods does: none fetches from the network, and only cache-tax and prompt-upgrade make model calls (see below).
 - **Present choices as clickable options** (AskUserQuestion). The user prefers not to type answers.
 - **Never modify mod code on this machine.** Install the reviewed commit as it is. If a mod fails validate or its tests, recommend skipping it; if that mod is hw-write-guard, stop and tell the user.
-- **The clone is live.** The marketplace is the folder itself, so an edit or `git pull` there changes what runs at the next `/reload-plugins`. Review before pulling.
+- **The clone is live.** The marketplace is the folder itself, so an edit or `git pull` there changes what runs at the next session start or `/reload-plugins`. Review before pulling.
 
 ## Install
 
@@ -28,20 +28,20 @@ Options (lists can be comma-separated, e.g. `-Exclude "cc-arcade,savvy-progress"
 - `-Disable <mods>` installs them but switches them off, e.g. `-Disable filetree`.
 - hw-write-guard can't be excluded or disabled without `-AllowNoHwGuard`. Use it only when the user confirms no hardware is attached.
 - savvy-progress is installed switched off; `-EnableSavvyProgress` turns it on.
-- `-DisableClashes` switches off enabled copies of any mod this run installs that come from other marketplaces (upstream cache-tax, redact, plan-progress, blast-radius, replay-theater, …), plus token-weather, which hides other mods' rows, each at the scope it's installed at. Without it, the script only lists them. **Ask the user first.**
+- `-DisableClashes` switches off enabled copies of any mod this run installs that come from other marketplaces (upstream cache-tax, redact, plan-progress, blast-radius, replay-theater, …), plus token-weather, which hides other mods' rows, each at the scope it's installed at. Only one copy of a mod name loads its hooks, so an enabled upstream copy can run instead of the reviewed one. Without it, the script only lists them. **Ask the user first.**
 - `-SkipTests` skips the tests.
 - `-Force` moves an existing `$HOME\src\claude-mods` aside instead of stopping.
 
 What it checks:
 - Every mod name is checked before anything changes: an unknown mod, `-Disable reflect-mod`, or one mod in both lists stops the script.
-- It warns when Claude Code is outside 2.1.295–2.1.300.
+- It warns when Claude Code is outside 2.1.295–2.1.301.
 - A failing test in one of this marketplace's own mods (not vendored) stops the install.
 - A failing test in a vendored mod is only a warning. Two vendored mods are known to fail here, the same as at home:
   - cc-arcade's tests use `bun:test`, which `claude plugin test` doesn't run.
   - filetree has one layout test that fails.
 - If `my-claude-mods` is already registered at a different folder, the script stops and tells you how to remove it.
 
-The script stops at the first failure. When it finishes, run `/reload-plugins` (or restart Claude).
+The script stops at the first failure. When it finishes, restart Claude Code (`/exit`, then `claude --continue`). `/reload-plugins` is documented to load them too, but it can be held back by a prompt-cache warning until rerun with `--force`, and at home an update only took effect after a restart. Then check the Errors tab in `/plugin` for "Its hooks module does not load".
 
 If execution policy or a downloaded-file block stops `.\install.ps1`, don't bypass it: use the manual equivalent below, or ask the user.
 
@@ -87,7 +87,7 @@ The mods use the function-hook API (`register(on)`, `$.<noun>.<op>`), which is s
 | **auto-model** | Picks the model per prompt with local rules: quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus. Follow-ups ("yes", "push it") and quick prompts that ask for an action ("…and delete them", "reset the board") stay on the current model. After a switched turn, an `[AUTO]` row offers Redo with your own model, or Dismiss. `/automodel` shows each model's cache (age and tokens) and what switching would cost against staying; `/automodel off\|on`. | No model calls. It switches only when the other model's prompt-cache re-read costs little, counting how much of the chat each cache still holds: that model's cache is warm and holds as much as yours, yours went cold anyway (new session, 1h+ idle), Haiku under 75k tokens of context, Opus re-reading under 50k. A resumed chat counts as warm. It routes only first-party model names (`claude-…`), never Bedrock, Vertex or gateway names or a fallback model, and stops for the session if a switched turn errors or is refused. It changes only the main loop's requests for that one turn, so subagents and Fable sessions are left alone, and `/model` and mission-control's `[SYS]` keep showing your own pick. A switched turn runs at that model's default effort. The whole conversation always goes along; only Opus 5.5's earlier hidden reasoning is unreadable to the other model, and Opus reads it again on its next turn. Limits in `/config` (`haikuUnderTokens`, `switchUnderTokens`). Skip it if the account restricts which models it may use. |
 | prompt-upgrade | `/improve <prompt>`, or `/improve` alone for your last prompt, opens a pane: 2–4 questions with clickable answers and an "Anything else?" field, then your prompt and the improved one side by side, with Run, Edit first, Copy, Start over and Close. | ⚠️ **Makes model calls:** two Sonnet calls (`$.model.complete`) per use, only when asked; the model is in `/config`. It's `/improve` because `/upgrade` is a built-in command. Run sends the improved prompt as yours; Edit first puts it in the prompt box instead. |
 | todays-report | `/report [today\|week\|month\|year\|all]` opens a pane: tasks finished (main-loop turns that ended with an answer), time Claude worked, where the work went (by the most telling tool used: email, code, documents, research…), models, API-equivalent cost and tokens, and the day streak. Time saved and its value are estimates: tasks × minutes per task, at an hourly rate. | No model calls. It counts in the plugin's own store from install on, one entry per day; earlier history isn't read back. Defaults are 10 min per task and $50/h, both in `/config`. |
-| cc-arcade | `/arcade`: games and a pet above the prompt while Claude works. `/arcade list\|random\|auto\|colorblind\|stop\|<game>`. | Optional at work. The board fits the band and leaves room for other rows. A pet saved by version 0.2.0 or earlier had broken times; from 0.2.2 it is mended once and keeps its XP and counts (only its hatch time restarts). |
+| cc-arcade | `/arcade`: games and a pet above the prompt while Claude works. `/arcade list\|random\|auto\|colorblind\|stop\|<game>`. | Optional at work. The board fits the band and leaves room for other rows. A pet saved by version 0.2.0 or earlier had broken times. From 0.2.2 it is mended when read and keeps its XP, counts and mood (a missing mood starts at 70); its last-fed and hatch times restart. A session still on 0.2.0 keeps writing broken times until it restarts. A pet 0.2.1 already replaced with an egg can't be recovered. |
 | chat-bubbles | Messenger-style chat: Your prompts in right-aligned bubbles, Claude's replies in tinted cards, tool rows only stand out while running or failing. `/bubbles` opens a studio (441 palettes, search, mixer); `/bubbles <name>`, `random`, `next`, `bg <#hex>`, `base dark\|light`, `prompt bubble\|frame\|native`, `off`. | Changes nothing until a theme is picked. No network or processes. Vendored @ 5597448 (MIT) and patched so its footer keeps plan-progress's button; its backdrop pads only its own pane. See "App look" below. |
 
 `reflect-mod` is in the repo but never installed: reflect-lite replaces it, and it makes a Haiku call per prompt. The installer always skips it and the zip leaves it out.

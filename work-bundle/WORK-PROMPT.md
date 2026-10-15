@@ -27,12 +27,15 @@ Ground rules (apply to every step):
 - Don't sign in to anything, and never push, fork or open PRs on the repo from
   this machine.
 - If a command fails, stop and show me the error.
-- Tell me exactly which slash commands to run (e.g. /reload-plugins).
+- Run shell commands with the PowerShell tool, not Bash: paths like
+  $HOME\src\claude-mods break in Bash.
+- Tell me exactly which slash commands to run (e.g. /progress-sounds off).
 
 Step 1 - Preflight (read-only)
-- Report `claude --version` (the mods were tested on 2.1.295 through 2.1.300)
+- Report `claude --version` (the mods were tested on 2.1.295 through 2.1.301)
   and whether git and Git for Windows' bash are on PATH. Also report what
-  `Get-Command sleep,du,find,bash -All` resolves to: blast-radius needs Git
+  `Get-Command sleep,du,find,bash -All -ErrorAction SilentlyContinue`
+  resolves to, and which of those names are missing: blast-radius needs Git
   for Windows' bash (not WSL's), and filetree needs Git's find ahead of
   Windows' find.exe.
 - Check for managed/enterprise Claude Code settings that restrict plugins,
@@ -50,6 +53,10 @@ Step 2 - Get the code (ask first)
 - Clone it: `git clone https://github.com/aecheman27-gif/claude-mods
   $HOME\src\claude-mods` (if that folder exists, stop and ask). Record the
   commit hash: everything you review and install comes from that commit.
+  The mods run straight from this folder, so before adding the marketplace
+  and again at the end, check that `git -C $HOME\src\claude-mods rev-parse
+  HEAD` still prints that hash and `git -C $HOME\src\claude-mods status
+  --porcelain` prints nothing.
 
 Step 3 - Adversarial review (read-only, before installing anything)
 - Read README.md, .claude-plugin/marketplace.json and work-bundle/WORK-SETUP.md
@@ -78,10 +85,14 @@ Step 3 - Adversarial review (read-only, before installing anything)
 - Verify every finding against the code (file:line and the exact trigger);
   drop anything you can't make concrete.
 - Run `claude plugin validate` on the marketplace and on each mod, and
-  `claude plugin test <mod>` for each. (Known: cc-arcade's tests use bun:test,
-  which plugin test doesn't run; filetree has one failing layout test.)
-- Check for clashes with what's already installed (other copies of any of
-  these mods from other marketplaces, and token-weather).
+  `claude plugin test $HOME\src\claude-mods\<mod>` for each (it takes the
+  mod's folder). Known: cc-arcade's tests use bun:test, which plugin test
+  doesn't run, and filetree has one failing layout test; those two alone are
+  no reason to skip a mod.
+- Check for clashes with what's already installed: other copies of any of
+  these mods from other marketplaces, and token-weather. Only one copy of a
+  mod name loads its hooks, so an enabled copy from elsewhere could run
+  instead of the reviewed one.
 - Show me a table: mod | what it does | risk (low/med/high) and why | findings
   | test result | your recommendation (install / install disabled / skip).
   Then stop and wait for me.
@@ -92,7 +103,11 @@ Step 4 - Install, one mod at a time
 - For each mod ask Install / Install disabled / Skip, with its one-line summary
   and your recommendation in the question (one question per mod; up to 4
   questions per prompt is fine). Install with
-  `claude plugin install <mod>@my-claude-mods --scope user`.
+  `claude plugin install <mod>@my-claude-mods --scope user`; for Install
+  disabled, then run `claude plugin disable <mod>@my-claude-mods --scope user`.
+- Before installing a mod, if another copy with the same name (or
+  token-weather) is enabled, ask to disable it where it is installed:
+  `claude plugin disable <its id> --scope <its scope>`.
 - Never install reflect-mod (reflect-lite replaces it). Install savvy-progress
   disabled unless I say otherwise (plan-progress and flightdeck cover it).
 - hw-write-guard is required: real hardware is attached here. Keep it in `ask`
@@ -104,10 +119,13 @@ Step 4 - Install, one mod at a time
 - prompt-upgrade (/improve) makes two Sonnet calls each time I use it, and
   cache-tax's keepwarm sends forks while idle: say so in their questions.
 - todays-report (/report) only counts locally; nothing leaves the machine.
-- After installing plan-progress, offer to turn its sounds off for work
-  (`/progress-sounds off`).
-- Afterwards, tell me to run /reload-plugins and list what was installed,
-  disabled and skipped.
+- Afterwards, list what was installed, disabled and skipped, and tell me to
+  restart Claude Code (/exit, then `claude --continue`). /reload-plugins can
+  be held back by a prompt-cache warning, and on my home PC an update only
+  took effect after a restart. After the restart, check the Errors tab in
+  /plugin for "Its hooks module does not load" and that /hw-guard says ask,
+  and if plan-progress was installed, offer to turn its sounds off for work
+  (`/progress-sounds off`). Step 5 starts after that.
 
 Step 5 - Terminal look (optional, one change at a time)
 - Offer each "App look" step from WORK-SETUP.md separately (chat-bubbles
@@ -118,6 +136,6 @@ Step 5 - Terminal look (optional, one change at a time)
 
 Finish with what's installed, every file changed (with backup paths), how to
 undo each change, and a reminder that $HOME\src\claude-mods is live: any edit
-or `git pull` there changes what runs at the next /reload-plugins, so I should
-review before pulling.
+or `git pull` there changes what runs at the next session start or
+/reload-plugins, so I should review before pulling.
 ```

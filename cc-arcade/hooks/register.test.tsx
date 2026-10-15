@@ -6,13 +6,16 @@ import type { CommandRunInput, On, RenderPropsOf } from 'claude-code'
 const NOW = 1_800_000_000_000
 const MIN = 60_000
 
-type World = { store: Map<string, unknown>; clock: ReturnType<typeof mock.clock> }
+type World = { store: Map<string, unknown>; clock: ReturnType<typeof mock.clock>; failReads: boolean }
 
 function world(on: On, stored: Record<string, unknown> = {}): World {
-  const w: World = { store: new Map(Object.entries(stored)), clock: mock.clock(on, { now: NOW }) }
+  const w: World = { store: new Map(Object.entries(stored)), clock: mock.clock(on, { now: NOW }), failReads: false }
   on('session.start', async () => ({ cwd: 'C:/work' }) as never)
   on('command.register', async ($, e) => ({ value: { command: e.name } }) as never)
-  on('store.get', async ($, e) => ({ value: w.store.get(e.key) }) as never)
+  on('store.get', async ($, e) => {
+    if (w.failReads) throw new Error('store is busy')
+    return { value: w.store.get(e.key) } as never
+  })
   // stored as JSON, the way the real store keeps it
   on('store.set', async ($, e) => {
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -45,23 +48,43 @@ describe('the clock', () => {
   })
 
   test('a pet an older build stored with broken numbers is mended: it keeps its xp and counts', async ($, on) => {
-    const w = world(on, { pet: { xp: 1121, mood: null, at: {}, born: {}, tests: 2, fails: 0, commits: 30, edits: 651, last: 'commit' } })
+    const w = world(on, { pet: { xp: 1121, mood: null, at: {}, born: {}, tests: 2, fails: 1, commits: 30, edits: 651, last: 'test-fail' } })
     await start($)
-    expect(w.store.get('pet')).toEqual({ xp: 1121, mood: 70, at: NOW, born: NOW, tests: 2, fails: 0, commits: 30, edits: 651, last: 'commit' })
+    // what fed it last goes with the broken time: kept, it would read as just now
+    expect(w.store.get('pet')).toEqual({ xp: 1121, mood: 70, at: NOW, born: NOW, tests: 2, fails: 1, commits: 30, edits: 651 })
+    expect((await arcade($, 'auto')).text).not.toContain('tests just failed')
     await w.clock.advance(MIN)
     await $.tool.call({ tool: 'Edit', file_path: 'a.ts' } as never)
     expect(w.store.get('pet')).toEqual(expect.objectContaining({ xp: 1122, edits: 652, at: NOW + MIN, born: NOW, last: 'edit' }))
   })
 
-  test('a pet missing its counts feeds without NaN; junk stored later leaves the session’s pet to be fed', async ($, on) => {
+  test('each feed reads the store first: another session’s progress is kept, and junk there leaves this session’s pet to be fed', async ($, on) => {
     const w = world(on, { pet: { xp: 90, mood: 50, at: NOW - MIN, born: NOW - 60 * MIN, last: 'nap' } })
     await start($)
+    // a pet missing its counts feeds without NaN
     await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
     expect(w.store.get('pet')).toEqual({ xp: 92, mood: 38, at: NOW, born: NOW - 60 * MIN, tests: 0, fails: 1, commits: 0, edits: 0, last: 'test-fail' })
-    w.store.set('pet', 'broken')
+    w.store.set('pet', { ...(w.store.get('pet') as object), xp: 500 })
     await $.tool.call({ tool: 'Edit', file_path: 'a.ts' } as never)
-    // the store held junk: the pet this session already has is fed instead
-    expect(w.store.get('pet')).toEqual(expect.objectContaining({ xp: 93, fails: 1, edits: 1 }))
+    expect(w.store.get('pet')).toEqual(expect.objectContaining({ xp: 501, edits: 1 }))
+    let xp = 501
+    for (const junk of ['broken', {}, [1, 2], { xp: 'lots', edits: 9 }]) {
+      w.store.set('pet', junk)
+      await $.tool.call({ tool: 'Edit', file_path: 'a.ts' } as never)
+      expect(w.store.get('pet')).toEqual(expect.objectContaining({ xp: ++xp }))
+    }
+  })
+
+  test('a store that cannot be read is never written over', async ($, on) => {
+    const good = { xp: 1121, mood: 60, at: NOW - MIN, born: NOW - 60 * MIN, tests: 2, fails: 0, commits: 30, edits: 651, last: 'commit' }
+    const w = world(on, { pet: good })
+    w.failReads = true
+    await start($)
+    await $.tool.call({ tool: 'Edit', file_path: 'a.ts' } as never)
+    expect(w.store.get('pet')).toEqual(good)
+    w.failReads = false
+    await $.tool.call({ tool: 'Edit', file_path: 'a.ts' } as never)
+    expect(w.store.get('pet')).toEqual(expect.objectContaining({ xp: 1122, edits: 652 }))
   })
 
   test('a store that holds junk at start hatches a new pet', async ($, on) => {

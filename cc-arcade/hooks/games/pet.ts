@@ -22,20 +22,23 @@ export const newPet = (now: number): Pet => ({ xp: 0, mood: 70, at: now, born: n
 // a stored pet with its broken numbers mended. Builds up to 0.2.0 stored the clock's promise as `at`
 // and `born` (`{}` once saved) and could leave the mood null, while the xp and counts they kept are
 // good: the pet keeps every number that is sound and only the broken ones start over. Undefined when
-// what is stored is not a pet at all.
+// there is no xp to keep, as in anything that is not a pet at all.
 export function repairPet(saved: unknown, now: number): Pet | undefined {
-  if (typeof saved !== 'object' || saved === null || Array.isArray(saved)) return undefined
+  if (typeof saved !== 'object' || saved === null) return undefined
   const p = saved as Record<string, unknown>
-  const num = (v: unknown, fallback: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : fallback)
+  const sound = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
+  const num = (v: unknown, fallback: number) => (sound(v) ? v : fallback)
+  if (!sound(p.xp)) return undefined
   const at = num(p.at, now)
   const pet: Pet = {
-    xp: num(p.xp, 0),
+    xp: p.xp,
     mood: Math.min(100, num(p.mood, 70)),
     at,
     born: num(p.born, at),
     tests: num(p.tests, 0), fails: num(p.fails, 0), commits: num(p.commits, 0), edits: num(p.edits, 0),
   }
-  if (typeof p.last === 'string' && Object.hasOwn(XP, p.last)) pet.last = p.last as PetEvent
+  // what fed it last is kept only with its time: under a mended time it would read as just now
+  if (sound(p.at) && typeof p.last === 'string' && Object.hasOwn(XP, p.last)) pet.last = p.last as PetEvent
   return pet
 }
 

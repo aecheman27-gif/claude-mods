@@ -42,7 +42,7 @@ $Source = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path   
 $Dest = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dest).TrimEnd('\', '/')   # 5.1 passes "C:\my mods\" to claude as C:\my mods"
 $Market = 'my-claude-mods'
 $TestedFrom = '2.1.295'
-$TestedTo = '2.1.300'
+$TestedTo = '2.1.301'
 $Guard = 'hw-write-guard'
 $OffByDefault = 'savvy-progress'   # plan-progress and flightdeck cover it, and it can hide other mods' band rows
 $Extra = @('token-weather')   # not in this bundle, but its band row hides other mods' rows
@@ -186,7 +186,7 @@ if (-not $clash) { Write-Host '  none enabled' }
 else {
   foreach ($c in $clash) { Write-Host "  $($c.id) ($($c.scope) scope)" }
   if (-not $DisableClashes) {
-    Warn "these copies run alongside this bundle's: two cache-tax drop a send twice, two redact scrub twice, two guards ask twice, and token-weather hides other mods' rows. Re-run with -DisableClashes to turn them off."
+    Warn "only one copy of a mod name loads its hooks, and it can be one of these instead of this bundle's reviewed copy; token-weather hides other mods' rows. Re-run with -DisableClashes to turn them off, then check the Errors tab in /plugin."
   }
   else {
     foreach ($c in $clash) {
@@ -200,5 +200,5 @@ else {
 }
 
 Step 'Done'
-Write-Host '  In Claude Code run /reload-plugins (or restart Claude) to load them.'
+Write-Host '  Restart Claude Code to load them (/exit, then claude --continue). /reload-plugins can be held back by a prompt-cache warning until rerun with --force.'
 if ($DryRun) { Write-Host '  This was a dry run: nothing was copied, added, installed, enabled or disabled.' -ForegroundColor Yellow }
