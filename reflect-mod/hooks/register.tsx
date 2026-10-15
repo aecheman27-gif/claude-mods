@@ -163,9 +163,12 @@ async function refreshBand($: EngineInterface) {
   await update($, pending, () => mine)
 }
 
+/** The CLAUDE.md a scope writes; undefined for global when there is no home folder to put it in. */
 async function fileFor($: EngineInterface, scope: 'global' | 'project', root: string) {
-  if (scope === 'global') return `${(await $.env.get('HOME')) ?? ''}/.claude/CLAUDE.md`
-  return `${root}/CLAUDE.md`
+  if (scope === 'project') return `${root}/CLAUDE.md`
+  // USERPROFILE first: Windows sets it and usually no HOME, which used to send this to C:\.claude\CLAUDE.md.
+  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+  return home ? `${home.replace(/\\/g, '/').replace(/\/+$/, '')}/.claude/CLAUDE.md` : undefined
 }
 
 async function readText($: EngineInterface, path: string) {
@@ -190,7 +193,8 @@ async function record($: EngineInterface, v: Verdict, root: string, isExplicit: 
     await saveItems($, list)
     return
   }
-  const target = await readText($, await fileFor($, v.scope, root))
+  const file = await fileFor($, v.scope, root)
+  const target = file === undefined ? '' : await readText($, file)
   const isKnown = target
     .split('\n')
     .some(line => /^\s*[-*] /.test(line) && similarity(line.replace(/^\s*[-*]\s+/, ''), v.rule) >= SAME)
@@ -282,6 +286,10 @@ async function saveTo($: EngineInterface, l: Learning, scope: 'global' | 'projec
     if (latest === undefined || latest.status !== 'pending') return
     const root = await $.session.root()
     const path = await fileFor($, scope, root)
+    if (path === undefined) {
+      $.ui.toast('reflect: neither USERPROFILE nor HOME is set, so there is no ~/.claude/CLAUDE.md to write - nothing written')
+      return
+    }
     const before = await readText($, path)
     const after = withRule(before, l.rule)
     if (after === undefined) {

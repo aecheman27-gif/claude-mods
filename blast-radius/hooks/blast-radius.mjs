@@ -3,14 +3,17 @@
 //
 // Blast Radius: holds a risky Bash command and shows what it would change.
 //
-// tool.call (Bash): if the command is risky, work out its blast radius, open a
-// pane with Proceed and Cancel, and hold the call until one is pressed.
+// tool.call (Bash, Monitor): if the command is risky, work out its blast
+// radius, open a pane with Proceed and Cancel, and hold the call until one is
+// pressed. Anything that goes wrong while holding refuses the call.
 // ui.render (Pane): draws the report. If the surface won't place the pane (a
 // narrow terminal), the same report is drawn in the AbovePrompt band instead.
 //
 // Holding: a hook has 10 s of its own time, but time spent inside a `$` call is
 // free. So the hold loop waits on a short `$.process.run(["sleep", ...])` until
-// a button's onPress sets the decision.
+// a button's onPress sets the decision. ($.clock.sleep is only the fallback: its
+// wait counts against the 10 s.) On Windows the sleep and the measuring run in
+// Git Bash, found by path, since neither `sleep` nor a usable `bash` is on PATH.
 //
 // The host reads `on(...)` and `$.noun.method(...)` from source, so they are
 // spelled literally, and helpers that take `$` are top-level functions.
@@ -24,33 +27,35 @@ const LIST_MAX = 10;
 let held = null;
 
 export function register(on) {
-  on("tool.call", { tool: "Bash" }, async ($, e, next) => {
+  // Modified for my-claude-mods: Monitor's `command` is a shell command too.
+  on("tool.call", { tool: ["Bash", "Monitor"] }, async ($, e, next) => {
     const risk = classify(String(e.command ?? ""));
     if (risk === null) {
       return next(e);
     }
-    // One hold at a time. If another risky call is already held (a subagent's,
-    // say), wait until it is answered. `held` is claimed with no await between
-    // the check and the claim, so two waiting calls can't both get through.
-    while (held !== null) {
-      if (next.signal.aborted) {
-        return { deny: "Blast Radius held this command and did not run it: the turn was interrupted. Do not retry it unless the user asks you to." };
-      }
-      await $.process.run(["sleep", POLL_SECONDS], { timeoutMs: 5000 });
-    }
     const mine = { command: String(e.command), risk, report: null, decision: null, where: "pane" };
-    held = mine;
-
     let opened = { isPlaced: false };
     let decision;
     let summary = risk.label;
     try {
+      // One hold at a time. If another risky call is already held (a subagent's,
+      // say), wait until it is answered. `held` is claimed with no await between
+      // the check and the claim, so two waiting calls can't both get through.
+      // The wait is inside the try, so a wait that fails refuses this call too.
+      while (held !== null) {
+        if (next.signal.aborted) {
+          return { deny: "Blast Radius held this command and did not run it: the turn was interrupted. Do not retry it unless the user asks you to." };
+        }
+        await pause($);
+      }
+      held = mine;
+
       // Measure where the command will run: the session folder, moved by any
       // `cd dir &&` or `git -C dir` earlier in the same command line.
       const sessionCwd = await $.session.cwd();
       const cwd = risk.dir ? await resolveDir($, sessionCwd, risk.dir) : sessionCwd;
       mine.report = cwd === null
-        ? { summary: `${risk.label} in ${risk.dir}`, lines: [], note: `Couldn't find the folder ${risk.dir}, so I couldn't measure what this would change.` }
+        ? { summary: `${risk.label} in ${shown(risk.dir)}`, lines: [], note: `Couldn't find the folder ${shown(risk.dir)}, so I couldn't measure what this would change.` }
         : await measure($, risk, cwd);
       summary = mine.report.summary;
 
@@ -70,7 +75,7 @@ export function register(on) {
           mine.decision = "timeout";
           break;
         }
-        await $.process.run(["sleep", POLL_SECONDS], { timeoutMs: 5000 });
+        await pause($);
       }
     } catch {
       mine.decision = "error"; // anything unexpected refuses the command
@@ -104,6 +109,14 @@ export function register(on) {
     return {
       deny: `Blast Radius held this command and did not run it: ${why}. It would have: ${summary}. Do not retry it unless the user asks you to.`,
     };
+  }).catch(($, e, next) => {
+    // Modified for my-claude-mods: fail closed. Without this, a hook that throws
+    // or overruns is skipped and the engine runs the command unheld. Asked in
+    // the hook's place (a re-entry), it judges the command text alone.
+    if (next.error.kind === "re-entry" ? classify(String(e.command ?? "")) === null : next.called) {
+      return next(e);
+    }
+    return { deny: "Blast Radius could not hold this command, so it did not run. Do not retry it unless the user asks you to." };
   });
 
   on("ui.render", { component: "Pane" }, ($, e, next) => {
@@ -125,29 +138,90 @@ export function register(on) {
 
 // sudo options that take a value, so the value isn't read as the command.
 const SUDO_VALUE_OPTIONS = new Set(["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"]);
+// Modified for my-claude-mods: the other wrappers' options that take a value.
+const ENV_VALUE_OPTIONS = new Set(["-u", "--unset", "-S", "--split-string"]); // -C moves the folder
+const NICE_VALUE_OPTIONS = new Set(["-n", "--adjustment"]);
+const TIMEOUT_VALUE_OPTIONS = new Set(["-s", "--signal", "-k", "--kill-after"]);
+const XARGS_VALUE_OPTIONS = new Set(["-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--delimiter", "--eof", "--arg-file"]);
+// Shells whose -c script is a command line of its own.
+const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 // Commands that only read, so a bare word "migrate" in them isn't a migration.
 const READ_ONLY = new Set(["ls", "cat", "echo", "printf", "grep", "rg", "find", "less", "head", "tail", "cd", "git"]);
+// Separators between commands: && || ; | newline, and a lone & (not &&, &>, >& or <&).
+const SEPARATORS = /&&|\|\||;|\||\n|(?<![<>&])&(?!>)/;
+// Stands in a command line for a $( ), <( ), >( ) or `...` that is read on its own.
+const SUB = "\u0001";
 
 /** A folder a later `cd arg` moves to, given the folder so far (null = the session folder). */
 function joinDir(dir, arg) {
-  if (arg === undefined || arg === "~" || arg.startsWith("/") || arg.startsWith("~/")) {
+  if (arg === undefined || arg === "~" || arg.startsWith("/") || arg.startsWith("~/") || /^[A-Za-z]:[\\/]/.test(arg)) {
     return arg ?? "~";
   }
   return dir ? `${dir}/${arg}` : arg;
 }
 
-/** The first risky segment of a shell command, or null. */
-function classify(command) {
-  let dir = null; // where a `cd` earlier on the line moved to; null means the session folder
+/** Text for the pane, with each lifted substitution shown as $(…). */
+function shown(text) {
+  return String(text).split(SUB).join("$(…)");
+}
+
+/**
+ * The command line with each $( ), <( ), >( ) and `...` replaced by SUB, and
+ * the commands inside them in order. They run before the command around them.
+ */
+function lift(command) {
+  const inner = [];
+  let outer = "";
+  for (let i = 0; i < command.length; i += 1) {
+    const c = command[i];
+    if ((c === "$" || c === "<" || c === ">") && command[i + 1] === "(") {
+      let depth = 1;
+      let j = i + 2;
+      for (; j < command.length && depth > 0; j += 1) {
+        if (command[j] === "(") {
+          depth += 1;
+        } else if (command[j] === ")") {
+          depth -= 1;
+        }
+      }
+      inner.push(command.slice(i + 2, depth === 0 ? j - 1 : j));
+      outer += SUB;
+      i = j - 1;
+    } else if (c === "`") {
+      const end = command.indexOf("`", i + 1);
+      const stop = end === -1 ? command.length : end;
+      inner.push(command.slice(i + 1, stop));
+      outer += SUB;
+      i = stop;
+    } else {
+      outer += c;
+    }
+  }
+  return { outer, inner };
+}
+
+/** The first risky segment of a shell command, or null. `start` is where the line starts (null = the session folder). */
+function classify(command, start = null) {
+  const { outer, inner } = lift(command);
+  let dir = start; // where a `cd` earlier on the line moved to; null means the session folder
   const scopes = []; // dir to restore when a ( subshell ) closes
   const pushed = []; // pushd stack, for popd
-  for (const raw of command.split(/&&|\|\||;|\||\n/)) {
+  let lifted = 0; // how many of `inner` have been read
+  for (const raw of outer.split(SEPARATORS)) {
     const opens = (raw.match(/^\s*\(+/)?.[0].trim().length) ?? 0;
     // Trailing redirects and & don't hide a closing ) : `(cd sub && make) > log`.
     const tail = raw.replace(/(?:\s*(?:\d*>>?|&>>?|<)\s*\S+|\s*&)+\s*$/, "");
     const closes = (tail.match(/\)+\s*$/)?.[0].trim().length) ?? 0;
     for (let k = 0; k < opens; k += 1) {
       scopes.push(dir);
+    }
+    // A $( ) or `...` in this segment runs first, in the same folder.
+    for (let n = raw.split(SUB).length - 1; n > 0; n -= 1) {
+      const risk = classify(inner[lifted], dir);
+      lifted += 1;
+      if (risk !== null) {
+        return risk;
+      }
     }
     const risk = classifySegment(raw, dir, pushed);
     if (risk !== null && risk.cd === undefined) {
@@ -164,33 +238,63 @@ function classify(command) {
 }
 
 // Words that can come before the real command without changing what it does.
-const PREFIXES = new Set(["command", "exec", "env", "nohup", "time", "then", "do", "else", "!"]);
+const PREFIXES = new Set(["command", "exec", "nohup", "time", "then", "do", "else", "!"]);
+
+/** Drops leading options, and the value after each one in `takesValue`; stops after `--`. */
+function dropOptions(words, takesValue) {
+  while (words.length > 0 && words[0].startsWith("-") && words[0] !== "-") {
+    const option = words.shift();
+    if (option === "--") {
+      break;
+    }
+    if (takesValue.has(option)) {
+      words.shift();
+    }
+  }
+}
 
 /** One segment: a risk, { cd } for a folder change, or null. */
 function classifySegment(segment, dir, pushed) {
   {
     const words = tokenize(segment.trim().replace(/^[({]+\s*/, "").replace(/\s*[)}]+$/, ""));
-    while (words.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) {
-      words.shift(); // leading VAR=value
-    }
-    if (words[0] === "sudo") {
-      words.shift();
-      while (words.length > 0 && words[0].startsWith("-")) {
-        const option = words.shift();
-        if (SUDO_VALUE_OPTIONS.has(option)) {
-          words.shift();
-        }
-      }
-    }
-    while (words.length > 0 && (PREFIXES.has(words[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]))) {
-      words.shift();
-    }
-    if (words[0] === "nice") {
-      words.shift();
-      if (words[0] === "-n") {
-        words.splice(0, 2);
-      } else if (/^-\d+$/.test(words[0] ?? "")) {
+    // Modified for my-claude-mods: wrappers in any order and number (VAR=value,
+    // sudo, env, nice, timeout, nohup, xargs) are stripped down to the command
+    // they run. xargs hands that command paths from its input.
+    let fromInput = false;
+    for (;;) {
+      const word = (words[0] ?? "").replace(/^\\/, "");
+      const base = word.slice(word.lastIndexOf("/") + 1);
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || PREFIXES.has(word)) {
+        words.shift(); // leading VAR=value, or a word that changes nothing
+      } else if (base === "sudo") {
         words.shift();
+        dropOptions(words, SUDO_VALUE_OPTIONS);
+      } else if (base === "env") {
+        words.shift();
+        while (words.length > 0 && words[0].startsWith("-") && words[0] !== "-") {
+          const option = words.shift();
+          if (option === "--") {
+            break;
+          }
+          if (option === "-C" || option === "--chdir") {
+            dir = joinDir(dir, words.shift());
+          } else if (ENV_VALUE_OPTIONS.has(option)) {
+            words.shift();
+          }
+        }
+      } else if (base === "nice") {
+        words.shift();
+        dropOptions(words, NICE_VALUE_OPTIONS);
+      } else if (base === "timeout") {
+        words.shift();
+        dropOptions(words, TIMEOUT_VALUE_OPTIONS);
+        words.shift(); // the duration
+      } else if (base === "xargs") {
+        words.shift();
+        dropOptions(words, XARGS_VALUE_OPTIONS);
+        fromInput = true;
+      } else {
+        break;
       }
     }
     const [first, ...args] = words;
@@ -198,6 +302,25 @@ function classifySegment(segment, dir, pushed) {
       return null;
     }
     const cmd = first.replace(/^\\/, ""); // \rm skips aliases; it's still rm
+    const base = cmd.slice(cmd.lastIndexOf("/") + 1);
+    if (SHELLS.has(base)) {
+      // bash -c "script", sh -c '...': read the script as a command line.
+      const at = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
+      if (at !== -1 && args[at + 1] !== undefined) {
+        return classify(args[at + 1], dir);
+      }
+    }
+    if (base === "eval") {
+      return classify(args.join(" "), dir);
+    }
+    if (base === "find") {
+      // find -delete and find -exec rm delete what find matches as it runs.
+      const exec = args.findIndex((a) => /^-(exec|execdir|ok|okdir)$/.test(a));
+      const execRm = exec !== -1 && /(^|\/)rm$/.test((args[exec + 1] ?? "").replace(/^\\/, ""));
+      if (args.includes("-delete") || execRm) {
+        return { kind: "find", label: args.includes("-delete") ? "find -delete" : "find -exec rm", dir, unmeasured: "find chooses the files as it runs" };
+      }
+    }
     if (cmd === "cd") {
       return { cd: args[0] === "-" ? "-" : joinDir(dir, args[0]) };
     }
@@ -214,6 +337,9 @@ function classifySegment(segment, dir, pushed) {
       const force = flags.some((f) => f === "--force" || (/^-[^-]/.test(f) && f.includes("f")));
       if (recursive || force) {
         const targets = args.filter((a) => !a.startsWith("-") || a === "-");
+        if (fromInput) {
+          return { kind: "rm", label: `xargs rm ${flags.join(" ")}`.trim(), targets: [], dir, unmeasured: "xargs passes rm the paths from its input" };
+        }
         return { kind: "rm", label: `rm ${flags.join(" ")}`.trim(), targets, dir };
       }
     }
@@ -239,7 +365,9 @@ function classifySegment(segment, dir, pushed) {
       if (sub === "clean") {
         return { kind: "git-clean", label: "git clean", args: rest, dir: gitDir };
       }
-      if (sub === "push" && rest.some((a) => a === "--force" || a === "-f" || a.startsWith("--force-with-lease") || /^\+/.test(a))) {
+      // -f alone or in a bundle (-fu); the letters after an o are -o's value.
+      const forces = (a) => a === "--force" || (/^-[^-]/.test(a) && a.slice(1).split("o")[0].includes("f")) || a.startsWith("--force-with-lease") || /^\+/.test(a);
+      if (sub === "push" && rest.some(forces)) {
         return { kind: "git-push-force", label: "git push --force", args: rest, dir: gitDir };
       }
       const stagedOnly = sub === "restore" && rest.includes("--staged") && !rest.includes("--worktree") && !rest.includes("-W");
@@ -268,16 +396,64 @@ function classifySegment(segment, dir, pushed) {
 }
 
 // Resolves a `cd` target to an absolute folder, or null if it doesn't exist.
-// The target is passed as an argument, never as source.
-const CD_SCRIPT = `unset CDPATH; d="$1"; case "$d" in "~") d="$HOME";; "~/"*) d="$HOME/\${d#\\~/}";; esac; cd -- "$d" 2>/dev/null && pwd -P`;
+// The target is passed as an argument, never as source. Git Bash's cygpath
+// turns /c/... into C:/..., a folder Windows can start a process in.
+const CD_SCRIPT = `unset CDPATH; d="$1"; case "$d" in "~") d="$HOME";; "~/"*) d="$HOME/\${d#\\~/}";; esac; cd -- "$d" 2>/dev/null && { cygpath -m "$(pwd -P)" 2>/dev/null || pwd -P; }`;
 
 async function resolveDir($, sessionCwd, dir) {
   if (dir === "-") {
     return null; // `cd -` depends on the shell's history
   }
-  const run = await $.process.run(["bash", "-c", CD_SCRIPT, "blast-radius", dir], { cwd: sessionCwd, timeoutMs: 5000 });
+  const bash = await findBash($);
+  if (bash === null) {
+    return null;
+  }
+  const run = await $.process.run([bash, "-c", CD_SCRIPT, "blast-radius", dir], { cwd: sessionCwd, timeoutMs: 5000 });
   const out = run.stdout.trim();
   return run.exitCode === 0 && out !== "" ? out : null;
+}
+
+// Modified for my-claude-mods: on Windows the first bash on PATH is usually
+// WSL's (C:\Windows\System32\bash.exe), where C:/ and /c/ paths don't exist, so
+// it measured "nothing to delete". Measure in Git Bash, found by path. `bash`
+// elsewhere; null on Windows with no Git Bash found.
+let bashPath;
+
+async function findBash($) {
+  if (bashPath === undefined) {
+    bashPath = await lookUpBash($);
+  }
+  return bashPath;
+}
+
+async function lookUpBash($) {
+  if ((await $.env.get("OS")) !== "Windows_NT") {
+    return "bash";
+  }
+  const set = await $.env.get("CLAUDE_CODE_GIT_BASH_PATH");
+  if (set && (await $.fs.exists(set))) {
+    return set;
+  }
+  const programFiles = await $.env.get("ProgramFiles");
+  if (programFiles && (await $.fs.exists(`${programFiles}\\Git\\bin\\bash.exe`))) {
+    return `${programFiles}\\Git\\bin\\bash.exe`;
+  }
+  // Elsewhere, from the git on PATH: its exec path is <Git>/mingw64/libexec/git-core.
+  const git = await $.process.run(["git", "--exec-path"], { timeoutMs: 5000 }).catch(() => null);
+  const root = git?.exitCode === 0 ? git.stdout.trim().replace(/[\\/][^\\/]+[\\/]libexec[\\/]git-core$/i, "") : "";
+  return root && (await $.fs.exists(`${root}/bin/bash.exe`)) ? `${root}/bin/bash.exe` : null;
+}
+
+/** One poll of a hold: a `$` call, so the wait doesn't spend the hook's own 10 s. */
+async function pause($) {
+  const bash = await findBash($);
+  if (bash === null) {
+    // Windows with no Git Bash: a clock wait does spend the 10 s, so an
+    // unanswered hold ends (refused) after about that, rather than at once.
+    await $.clock.sleep(Number(POLL_SECONDS) * 1000);
+    return;
+  }
+  await $.process.run(bash === "bash" ? ["sleep", POLL_SECONDS] : [bash, "-c", `sleep ${POLL_SECONDS}`], { timeoutMs: 5000 });
 }
 
 /** Splits one segment into words, honouring quotes. Good enough to read flags and paths. */
@@ -296,6 +472,9 @@ function tokenize(text) {
 /** { summary, lines, note } for the pane. Never throws: a failed read is said, not hidden. */
 async function measure($, risk, cwd) {
   try {
+    if (risk.unmeasured) {
+      return { summary: `${risk.label} (could not measure it)`, lines: [], note: `Could not measure: ${risk.unmeasured}.` };
+    }
     if (risk.kind === "rm") {
       return await measureRm($, risk, cwd);
     }
@@ -323,7 +502,7 @@ for p in "$@"; do
 done
 if (( \${#paths[@]} == 0 )); then echo "0 0 0"; exit 0; fi
 # A relative path gets ./ in front, so find never reads a name like -delete as an action.
-for i in "\${!paths[@]}"; do case "\${paths[$i]}" in /*) ;; *) paths[$i]="./\${paths[$i]}";; esac; done
+for i in "\${!paths[@]}"; do case "\${paths[$i]}" in /*|[A-Za-z]:*) ;; *) paths[$i]="./\${paths[$i]}";; esac; done
 files=$(find "\${paths[@]}" \\( -type f -o -type l \\) 2>/dev/null | wc -l | tr -d ' ')
 kb=$(du -skc "\${paths[@]}" 2>/dev/null | tail -n1 | cut -f1)
 echo "$files $(( \${kb:-0} * 1024 )) \${#paths[@]}"
@@ -334,9 +513,25 @@ async function measureRm($, risk, cwd) {
   if (risk.targets.length === 0) {
     return { summary: "rm with no paths", lines: [], note: "No paths to expand." };
   }
-  const run = await $.process.run(["bash", "-c", RM_SCRIPT, "blast-radius", ...risk.targets], { cwd, timeoutMs: 15000 });
-  const [head, ...rest] = run.stdout.split("\n").filter((l) => l !== "");
-  const [files, bytes, found] = (head ?? "0 0 0").split(" ").map(Number);
+  // Modified for my-claude-mods: a path from $VAR, $( ) or `...` is known only
+  // when the shell runs, so it isn't measured as the literal text.
+  if (risk.targets.some((t) => t.includes("$") || t.includes(SUB))) {
+    return { summary: `${risk.label} (could not measure it)`, lines: [], note: "Could not measure: a path comes from a variable or a command's output, which only the shell knows." };
+  }
+  const bash = await findBash($);
+  if (bash === null) {
+    return { summary: `${risk.label} (could not measure it)`, lines: [], note: "Could not measure: Git Bash was not found. Set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe." };
+  }
+  const run = await $.process.run([bash, "-c", RM_SCRIPT, "blast-radius", ...risk.targets], { cwd, timeoutMs: 15000 });
+  const [head, ...rest] = run.stdout.split(/\r?\n/).filter((l) => l !== "");
+  // Modified for my-claude-mods: only a clean "files bytes paths" line is a
+  // measurement. A bash that failed, or printed an error, must not read as
+  // "delete nothing".
+  if (run.exitCode !== 0 || !/^\d+ \d+ \d+$/.test(head ?? "")) {
+    const why = run.stderr.trim() || head || `bash exited with ${run.exitCode}`;
+    return { summary: `${risk.label} (could not measure it)`, lines: [], note: `Could not measure: ${why.slice(0, 200)}` };
+  }
+  const [files, bytes, found] = head.split(" ").map(Number);
   if (!found) {
     return { summary: `delete nothing: no file matches ${risk.targets.join(" ")}`, lines: [], note: "The paths don't exist, so rm has nothing to remove." };
   }

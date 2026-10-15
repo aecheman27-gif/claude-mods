@@ -9,14 +9,34 @@ import { ago, branchOf, buildNote, DIR, keepInstructions, LATEST, MAX_AGE_MS, no
 // fresh session with a recent note offers to resume from it (fills the prompt,
 // never sends). It never compacts on its own. No network, no processes, no
 // model calls. Old notes are not pruned: $.fs has no delete.
+//
+// Only a note this plugin wrote is offered: each write records latest.md's
+// SHA-256 and time in $.store, keyed by its path, and a latest.md that doesn't
+// match (one committed to a cloned repo, say) is never framed as the person's
+// own handoff.
 
 const offer = atom({ plugin: 'checkpoint', key: 'offer' } as const, null)
 const RESUME = 'Read .claude/handoff/latest.md and continue from it: re-check the open tasks and files it lists before acting.'
+
+/** What $.store keeps per latest.md this plugin wrote, under `written:<path>`. */
+type Written = { sha256: string; savedAt: number }
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 async function rootOf($: EngineInterface): Promise<string> {
   return (await $.session.root()).replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+async function sha256(text: string): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** When this plugin wrote `path` with exactly the text it holds now; undefined for any other file. */
+async function writtenAt($: EngineInterface, path: string): Promise<number | undefined> {
+  const record = (await $.store.get(`written:${path}`)) as Written | undefined
+  if (!record || typeof record.sha256 !== 'string' || typeof record.savedAt !== 'number' || !(await $.fs.exists(path))) return undefined
+  return (await sha256(String(await $.fs.read(path)))) === record.sha256 ? record.savedAt : undefined
 }
 
 async function branch($: EngineInterface, root: string): Promise<string | undefined> {
@@ -38,7 +58,18 @@ async function saveNote($: EngineInterface, messages: readonly SessionMessage[],
   if (!(await $.fs.exists(`${dir}/.gitignore`))) await $.fs.write(`${dir}/.gitignore`, '*\n')
   await $.fs.write(`${dir}/${name}`, note)
   await $.fs.write(`${dir}/${LATEST}`, note)
+  const written: Written = { sha256: await sha256(note), savedAt: now }
+  await $.store.set(`written:${dir}/${LATEST}`, written)
   return `${DIR}/${name}`
+}
+
+/** Fills the resume prompt, unless latest.md has changed since the offer and so is no longer this plugin's note. */
+async function resumeIfOurs($: EngineInterface) {
+  if ((await writtenAt($, `${await rootOf($)}/${DIR}/${LATEST}`)) === undefined) {
+    $.ui.toast(`checkpoint: ${DIR}/${LATEST} changed since it was offered, so it was not resumed`)
+    return
+  }
+  await $.prompt.fill({ text: RESUME, mode: 'replace' })
 }
 
 export const register: Register = on => {
@@ -47,12 +78,10 @@ export const register: Register = on => {
     try {
       if ((await $.session.messages()).length === 0) {
         const latest = `${await rootOf($)}/${DIR}/${LATEST}`
-        if (await $.fs.exists(latest)) {
-          const { mtimeMs } = await $.fs.stat(latest)
-          if ((await $.clock.now()) - mtimeMs < MAX_AGE_MS) {
-            const tasks = openTaskCount(String(await $.fs.read(latest)))
-            await update($, offer, () => ({ savedAt: mtimeMs, tasks }))
-          }
+        const savedAt = await writtenAt($, latest)
+        if (savedAt !== undefined && (await $.clock.now()) - savedAt < MAX_AGE_MS) {
+          const tasks = openTaskCount(String(await $.fs.read(latest)))
+          await update($, offer, () => ({ savedAt, tasks }))
         }
       }
     } catch {
@@ -100,7 +129,7 @@ export const register: Register = on => {
     const when = ago((await $.clock.now()) - o.savedAt)
     const resume = () =>
       void update($, offer, () => null)
-        .then(() => $.prompt.fill({ text: RESUME, mode: 'replace' }))
+        .then(() => resumeIfOurs($))
         .catch(err => $.ui.toast(`checkpoint: could not fill the prompt: ${errText(err)}`))
     const mine = (
       <Box flexDirection="column" width={e.props.bodyColumns}>

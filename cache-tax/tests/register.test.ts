@@ -1,5 +1,6 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
-import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
+import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnStepResult, TurnUsage } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 
 import { statusIcons } from '../hooks/status-icons'
 import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
@@ -34,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; answeredBy?: { model?: string }; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
   if (opts.store) {
     const store = opts.store
     on('store.get', ($, e) => ({ value: store.get(e.key) }))
@@ -60,6 +61,10 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', () => ({ value: (opts.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
+  // The API's answer to a main-loop request: the model that answered may not be the one named (a plugin beneath re-routed it).
+  on('turn.step', async function* ($, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: usage({ model: opts.answeredBy?.model ?? e.model }) } as TurnStepResult
+  })
   on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
   on('session.compact', ($, e) => ({ messages: e.messages }))
   on('classic.SessionStart', () => ({}))
@@ -594,7 +599,7 @@ describe('keepwarm', () => {
 
   test('the ping figure counts output tokens at the model\'s rate, Sonnet 5 priced as itself', async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const w = world(on, [{ read: 200000, write: 0, out: 1000 }])
+    const w = world(on, [{ read: 200000, write: 0, out: 1000 }], { model: 'claude-sonnet-5' })
     await $.session.start(session)
     await $.command.run(run('keepwarm', '6h'))
     await $.turn.complete(turn({ usage: usage({ model: 'claude-sonnet-5' }) }))
@@ -635,7 +640,7 @@ describe('keepwarm', () => {
 
   test('the ping figure counts uncached input at the base rate', async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const w = world(on, [{ read: 200000, write: 0, input: 50000, out: 1000 }])
+    const w = world(on, [{ read: 200000, write: 0, input: 50000, out: 1000 }], { model: 'claude-sonnet-5' })
     await $.session.start(session)
     await $.command.run(run('keepwarm', '6h'))
     await $.turn.complete(turn({ usage: usage({ model: 'claude-sonnet-5' }) }))
@@ -825,4 +830,115 @@ describe('store per session', () => {
     await $.session.start(session)
     expect([...store.keys()]).toEqual(['deadline:other', 'every:other'])
   })
+})
+
+describe('whose prompt, and which model', () => {
+  const sent = (text: string, origin: PromptOrigin): PromptSubmitInput => ({ text, wait: false, origin })
+
+  test('only the person\'s own prompts are refused; a notification, a schedule, a peer, an SDK or a plugin prompt is sent with the price', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const others: PromptOrigin[] = [{ kind: 'task-notification' }, { kind: 'scheduled-trigger' }, { kind: 'peer' }, { kind: 'sdk' }, { kind: 'plugin', name: 'other' }]
+    for (const origin of others) {
+      expect((await $.prompt.submit(sent(origin.kind, origin))).drop).toBe(undefined)
+      expect(w.logs.at(-1)).toMatch(/^the prompt cache went cold 2h00m ago\. Sending this re-writes up to 200,502 tokens/)
+      expect(w.logs.at(-1)).toContain(`Sending anyway (a ${origin.kind} prompt, which nobody could send again)`)
+    }
+    expect(w.entered).toEqual(['task-notification', 'scheduled-trigger', 'peer', 'sdk', 'plugin'])
+  })
+
+  test('a plugin prompt sent as the person (a next-steps click) and a Remote Control one are refused once, like a typed one', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const click = sent('do the next step', { kind: 'plugin', name: 'next-steps', asUser: true })
+    expect((await $.prompt.submit(click)).drop).toMatch(/^cache-tax: the prompt cache went cold/)
+    expect((await $.prompt.submit(click)).drop).toBe(undefined)
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(sent('from my phone', { kind: 'bridge' }))).drop).toMatch(/^cache-tax: the prompt cache went cold/)
+    expect(w.entered).toEqual(['do the next step'])
+  })
+
+  test('a turn another plugin sent to another model does not keep the session model warm', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { model: 'claude-opus-5-5' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    await clock.advance(40 * MIN)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
+    await clock.advance(30 * MIN)
+    const r = await $.prompt.submit(prompt('hi'))
+    expect(r.drop).toMatch(/went cold 10m ago\. Sending this re-writes up to 200,502 tokens at \$8\/MTok = \$1\.60/)
+  })
+
+  test('a step is credited to the model that answered it, not the one it named', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const answeredBy: { model?: string } = {}
+    world(on, [], { model: 'claude-opus-5-5', answeredBy })
+    const step = async ($: Engine, model: string) => {
+      const stream = $.turn.step({ turnId: 't' + ++turns, index: 0, model, messageCount: 3 })
+      for await (const chunk of stream) void chunk
+      return stream.result
+    }
+    await $.session.start(session)
+    await step($, 'claude-opus-5-5')
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    await clock.advance(40 * MIN)
+    answeredBy.model = 'claude-haiku-5-5' // a plugin beneath sent it to Haiku
+    await step($, 'claude-opus-5-5')
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }), durationMs: 1000 }))
+    await clock.advance(30 * MIN)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toMatch(/went cold 10m ago/)
+  })
+
+  test('keepwarm does not fork while the main loop last asked another model, and resumes after a turn on its own', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm], { model: 'claude-opus-5-5' })
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '6h'))
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    await clock.advance(10 * MIN)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5' }) }))
+    expect(w.status.at(-1)).toMatch(/no ping while the last turn ran on another model/)
+    await clock.advance(60 * MIN)
+    expect(w.forks.length).toBe(0)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('a big write on another model is not a cold write paid and does not arm keepwarm', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { model: 'claude-opus-5-5' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-opus-5-5' }) }))
+    await $.turn.complete(turn({ usage: usage({ model: 'claude-haiku-5-5', cache_read_input_tokens: 0, cache_creation_input_tokens: 200502 }) }))
+    const card = await $.command.run(run('cache-tax', ''))
+    expect(card.text).toMatch(/0 cold writes paid/)
+    expect(card.text).toMatch(/keepwarm    off/)
+  })
+
+  for (const [model, tokens, cold, warmTurn] of [
+    ['claude-opus-5-5', 200000, '$1.60', '$0.04'],
+    ['claude-opus-5', 200000, '$2.00', '$0.10'],
+    ['claude-sonnet-5-5', 200000, '$0.80', '$0.04'],
+    ['claude-haiku-5-5', 80000, '$0.02', '$0.00'],
+    ['claude-haiku-5-5', 200000, '$0.20', '$0.01'],
+    ['claude-haiku-4-5', 200000, '$0.40', '$0.02'],
+    ['claude-fable-5-1', 200000, '$4.00', '$0.05'],
+  ] as const) {
+    test(`${model} at ${tokens} tokens is priced at its own list price: cold ${cold}, warm ${warmTurn}`, async ($, on) => {
+      mock.clock(on, { now: START })
+      world(on, [], { model, live: { tokens } })
+      await $.session.start(session)
+      await $.turn.complete(turn({ usage: usage({ model }) }))
+      const card = await $.command.run(run('cache-tax', ''))
+      expect(card.text).toContain(`cold cost   ${cold} to re-write it (warm turn ${warmTurn})`)
+    })
+  }
 })

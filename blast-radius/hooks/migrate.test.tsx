@@ -2,8 +2,11 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
+declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknown // the test runner's; the API types declare no timers
+
 test('a held manage.py migrate runs no project code, and Cancel refuses it', async ($, on) => {
   mock.clock(on, { now: 0 })
+  mock.env(on, {})
   const runs: string[][] = []
   let opened = false
   on('session.cwd', async () => ({ value: '/work/app' }) as never)

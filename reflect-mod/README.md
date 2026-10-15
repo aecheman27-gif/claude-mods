@@ -53,6 +53,8 @@ Use either this or the Python plugin, not both (every correction would be captur
    ```
 
    A rule already in the file (as any bullet) is not added twice. Broken markers stop the write instead of guessing.
+   `~` is your home folder: `USERPROFILE` (Windows), else `HOME`; with neither set, a global save writes nothing and
+   says so.
    The saved rule also goes into this session's system prompt (only while you stay in the project it belongs to).
 
 `remember: <rule>` skips the model and goes straight to the band. `/reflect-queue` lists what was found here and
@@ -76,5 +78,5 @@ Code config directory) until you decide on them.
 
 ```bash
 claude plugin validate mod
-claude plugin test mod        # 10 tests, mocked model - free
+claude plugin test mod        # 12 tests, mocked model - free
 ```

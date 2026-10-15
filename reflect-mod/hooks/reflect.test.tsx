@@ -12,16 +12,22 @@ type Opts = {
   files?: Record<string, string>
   root?: () => string
   box?: string
+  env?: Record<string, string>
 }
+
+// The engine hands fs hooks the path as this machine spells it (C:\repo\CLAUDE.md
+// on Windows for /repo/CLAUDE.md), so files are keyed with forward slashes and no drive.
+const fileKey = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
 function world(on: On, opts: Opts = {}) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-02T12:00:00Z') })
   mock.store(on, {})
-  mock.env(on, { HOME: '/home/u' })
+  mock.env(on, opts.env ?? { HOME: '/home/u' })
   const files: Record<string, string> = { ...(opts.files ?? {}) }
   const asked: string[] = []
   const systems: string[] = []
   const filled: string[] = []
+  const toasts: string[] = []
   on('model.complete', async ($, e) => {
     const text = /<user_message>([\s\S]*)<\/user_message>/.exec(e.prompt)?.[1] ?? ''
     asked.push(text)
@@ -33,10 +39,10 @@ function world(on: On, opts: Opts = {}) {
   })
   on('session.messages', async () => ok([{ role: 'assistant', text: 'I used npm to install it.', toolUses: [] }]))
   on('session.root', async () => ok(opts.root?.() ?? '/repo'))
-  on('fs.exists', async ($, e) => ok(e.path in files))
-  on('fs.read', async ($, e) => ok(files[e.path] ?? ''))
+  on('fs.exists', async ($, e) => ok(fileKey(e.path) in files))
+  on('fs.read', async ($, e) => ok(files[fileKey(e.path)] ?? ''))
   on('fs.write', async ($, e) => {
-    files[e.path] = e.text
+    files[fileKey(e.path)] = e.text
     return VOID
   })
   on('prompt.read', async () => ok({ text: opts.box ?? '', cursor: 0 }))
@@ -45,12 +51,15 @@ function world(on: On, opts: Opts = {}) {
     return { isFilled: true } as never
   })
   on('command.register', async ($, e) => ok({ command: e.name }))
-  on('ui.toast', async () => VOID)
+  on('ui.toast', async ($, e) => {
+    toasts.push(e.text)
+    return VOID
+  })
   on('ui.render', async () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('session.start', async () => ({ cwd: '/repo' }) as never)
   on('prompt.submit', async ($, e) => ({ text: e.text }))
   on('prompt.compose', async () => ({ sections: [] }))
-  return { clock, files, asked, systems, filled }
+  return { clock, files, asked, systems, filled, toasts }
 }
 
 const start = ($: Engine) => $.session.start({ source: 'startup', cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
@@ -220,4 +229,25 @@ test('broken markers in the target file block the write', async ($, on) => {
   await press($, 'save:')
   expect(w.files['/repo/CLAUDE.md']).toBe(broken)
   expect(await rows($)).toEqual(['reflect · "Use pnpm, not npm, in this repo"'])
+})
+
+test('a global rule goes under USERPROFILE (Windows has no HOME), not C:/.claude', async ($, on) => {
+  const ENGLISH = { 'always answer in English': { is_rule: true, rule: 'Answer in English', scope: 'global', confidence: 0.9 } }
+  const w = world(on, { verdicts: ENGLISH, env: { USERPROFILE: String.raw`C:\Users\u` } })
+  await start($)
+  await say($, w, 'always answer in English')
+  await press($, 'save:')
+  expect(w.files['/Users/u/.claude/CLAUDE.md']).toContain('- Answer in English')
+  expect(w.files['/.claude/CLAUDE.md']).toBeUndefined()
+})
+
+test('with neither USERPROFILE nor HOME set, a global rule is not written anywhere', async ($, on) => {
+  const ENGLISH = { 'always answer in English': { is_rule: true, rule: 'Answer in English', scope: 'global', confidence: 0.9 } }
+  const w = world(on, { verdicts: ENGLISH, env: {} })
+  await start($)
+  await say($, w, 'always answer in English')
+  await press($, 'save:')
+  expect(Object.keys(w.files)).toEqual([])
+  expect(w.toasts.at(-1)).toContain('neither USERPROFILE nor HOME is set')
+  expect(await rows($)).toEqual(['reflect · "Answer in English"'])
 })

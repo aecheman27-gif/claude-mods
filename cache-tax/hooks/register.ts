@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PromptOrigin, Register } from 'claude-code'
 import { statusIcons } from './status-icons'
 
 const TTL_MS = 60 * 60 * 1000
@@ -13,17 +13,24 @@ const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
 const KEY_ALWAYS = 'always'
 
-// $ per million tokens, [cache read, 1h cache write, output], list prices September 2026.
-// Longer family names first: a model id matches the first row it contains.
+// $ per million tokens, [cache read, 1h cache write, output], list prices October 2026.
+// More specific ids first: a model id matches the first row it contains.
 const PRICES: Array<[string, number, number, number]> = [
   ['fable-5-1', 0.25, 20, 50],
   ['fable-5', 1, 20, 50],
+  ['opus-5-5', 0.2, 8, 20],
   ['opus-5', 0.5, 10, 25],
   ['opus-4', 0.5, 10, 25],
+  ['sonnet-5-5', 0.2, 4, 10],
   ['sonnet-5', 0.2, 4, 10],
   ['sonnet', 0.3, 6, 15],
+  ['haiku-5-5', 0.01, 0.2, 0.5],
   ['haiku', 0.1, 2, 5],
 ]
+// Haiku 5.5 is priced by prompt size: past 100K tokens a request bills this row.
+const HAIKU_5_5_OVER: [number, number, number] = [0.05, 1, 2.5]
+const HAIKU_TIER_TOKENS = 100000
+const FAMILIES = ['fable', 'opus', 'sonnet', 'haiku']
 
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
@@ -35,8 +42,14 @@ export type State = {
   deadline: number
   every: number
   always: boolean
+  /** The last request to the session's own model family; another family's cache is not this one. */
   lastRequestAt: number
+  /** The id the API last reported for the session's own model family, for its price. */
   lastModel: string | null
+  /** The session's own model, as $.session.model() names it. */
+  model: string | null
+  /** The model that answered the main loop's last request: what a keepwarm fork re-sends to. */
+  lastStepModel: string | null
   ctx: number
   compacted: boolean
   guard: GuardMode
@@ -48,10 +61,50 @@ export type State = {
   stopped: string | null
 }
 
-function priceOf(model: string | null): [number, number, number] | null {
+/** [cache read, 1h write, output] for `model` on a request of `tokens` prompt tokens. */
+function priceOf(model: string | null, tokens = 0): [number, number, number] | null {
   const m = (model ?? '').toLowerCase().replace(/[\s.]+/g, '-')
-  for (const [family, read, write, output] of PRICES) if (m.includes(family)) return [read, write, output]
+  for (const [family, read, write, output] of PRICES) {
+    if (!m.includes(family)) continue
+    return family === 'haiku-5-5' && tokens > HAIKU_TIER_TOKENS ? HAIKU_5_5_OVER : [read, write, output]
+  }
   return null
+}
+
+/** The session's own model priced at its context: the id the API reported for it, else its name. */
+function ownPrice(s: State, tokens = s.ctx): [number, number, number] | null {
+  return priceOf(s.lastModel ?? s.model, tokens)
+}
+
+function familyOf(model: string | null | undefined): string | undefined {
+  const m = (model ?? '').toLowerCase()
+  return FAMILIES.find(f => m.includes(f))
+}
+
+/** Whether `model` is of the session's own family; while the session's model is unknown, every model counts. */
+function isOwn(s: State, model: string | null | undefined): boolean {
+  const own = familyOf(s.model)
+  return own === undefined || familyOf(model) === own
+}
+
+/** True when the main loop last asked another model, so a fork would warm that model's cache, not the session's. */
+function isSwitched(s: State): boolean {
+  return s.lastStepModel !== null && !isOwn(s, s.lastStepModel)
+}
+
+/** Reads the session's own model; when /model moved it to another family, that family's cache has no record yet. */
+async function readModel($: EngineInterface, s: State) {
+  const model = await $.session.model().catch(() => s.model)
+  if (s.model !== null && familyOf(model) !== familyOf(s.model)) {
+    s.lastRequestAt = 0
+    s.lastModel = null
+  }
+  s.model = model
+}
+
+/** A prompt the person sent and can send again: typed, sent by Remote Control, or a plugin's prompt in their name (a next-steps click). */
+function isPerson(origin: PromptOrigin): boolean {
+  return origin.kind === 'composer' || origin.kind === 'bridge' || (origin.kind === 'plugin' && origin.asUser === true)
 }
 
 export function parseDuration(text: string): number | null {
@@ -77,12 +130,12 @@ function fmtTok(n: number): string {
 }
 
 function coldUsd(s: State): number | null {
-  const price = priceOf(s.lastModel)
+  const price = ownPrice(s)
   return price ? s.ctx * price[1] / 1e6 : null
 }
 
 function warmUsd(s: State): number | null {
-  const price = priceOf(s.lastModel)
+  const price = ownPrice(s)
   return price ? s.ctx * price[0] / 1e6 : null
 }
 
@@ -93,7 +146,7 @@ function pingUsd(u: { input_tokens: number; output_tokens: number; cache_read_in
 
 /** The read-only upper bound: pings at the cache-read rate that cost as much as one cold write of the same context. */
 function breakEvenPings(s: State): number | null {
-  const price = priceOf(s.lastModel)
+  const price = ownPrice(s)
   if (!price || s.ctx <= 0) return null
   return Math.floor(price[1] / price[0])
 }
@@ -103,7 +156,7 @@ function isCold(s: State, now: number): boolean {
 }
 
 function guardText(s: State, now: number): string {
-  const price = priceOf(s.lastModel)
+  const price = ownPrice(s)
   const rate = price ? `$${price[1]}/MTok` : 'the cache-write rate'
   const warm = warmUsd(s)
   return `the prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago. Sending this re-writes ` +
@@ -124,6 +177,7 @@ export type ResumeFields = {
 export function resetForClear(s: State) {
   s.ctx = 0
   s.lastRequestAt = 0
+  s.lastStepModel = null
   s.compacted = false
   s.ackedAt = 0
   s.coldWritePending = false
@@ -150,6 +204,7 @@ function statusText(s: State, now: number): string | undefined {
   const nextText = !s.lastRequestAt ? ' · waiting for the first turn'
     : s.compacted ? ' · waiting for the first turn after compaction'
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
+    : isSwitched(s) ? ' · no ping while the last turn ran on another model'
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
 }
@@ -206,7 +261,9 @@ async function arm($: EngineInterface, s: State) {
   const now = await $.clock.now()
   if (now >= s.deadline) return stop($, s, null)
   // A cold window still needs expiry cleanup, but must not send a model request.
-  if (s.lastRequestAt && !s.compacted && !isCold(s, now)) {
+  // Nor may a fork that would re-send another model's last request: it would
+  // warm that model's cache, not the session's.
+  if (s.lastRequestAt && !s.compacted && !isCold(s, now) && !isSwitched(s)) {
     const untilCold = s.lastRequestAt + TTL_MS - now
     const delay = Math.min(s.deadline - now, untilCold, Math.max(1000, s.lastRequestAt + s.every - now))
     s.pending = $.clock.after(delay, () => { void ping($, s) })
@@ -222,7 +279,7 @@ async function ping($: EngineInterface, s: State) {
   const now = await $.clock.now()
   if (now >= s.deadline) return arm($, s)
   // A turn in the meantime re-armed the timer; this callback is stale.
-  if (isCold(s, now)) return arm($, s)
+  if (isCold(s, now) || isSwitched(s)) return arm($, s)
   if (now - s.lastRequestAt < s.every - 1000) return
   let reply
   try {
@@ -239,7 +296,7 @@ async function ping($: EngineInterface, s: State) {
     return stop($, s, reason)
   }
   const u = reply.usage
-  const price = priceOf(s.lastModel)
+  const price = ownPrice(s, u.cache_read_input_tokens + u.cache_creation_input_tokens + u.input_tokens)
   // A warm ping reads the prefix and writes only its own message; a write of a tenth of the read or more means the prefix broke.
   const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
   const usd = price ? pingUsd(u, price) : null
@@ -268,7 +325,7 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
 
 function card(s: State, now: number): string {
   const lines: string[] = []
-  lines.push(`${s.lastModel ?? 'model not seen yet'}`)
+  lines.push(`${s.lastModel ?? s.model ?? 'model not seen yet'}`)
   if (s.compacted) lines.push('state       reset by compaction, waiting for the first turn')
   else if (!s.lastRequestAt) lines.push('state       no request yet this session')
   else if (isCold(s, now)) lines.push(`state       COLD, last request ${fmtDuration(now - s.lastRequestAt)} ago`)
@@ -288,7 +345,7 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
+    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, model: null, lastStepModel: null, ctx: 0, compacted: false,
     guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
   }
 }
@@ -344,6 +401,7 @@ export const register: Register = on => {
       $.ui.status(undefined)
     }
     s.sid = await $.session.id()
+    await readModel($, s)
     const now = await $.clock.now()
     await prune($, s, now)
     const saved = await $.store.get(deadlineKey(s))
@@ -390,13 +448,13 @@ export const register: Register = on => {
       return r
     }
     const line = seedFromResume(s, e, await $.clock.now())
-    // The resume payload may omit the model; without it the guard cannot price the cold write.
-    if (!s.lastModel) s.lastModel = await $.session.model()
+    // The resume payload may omit the model; the session's own then prices the cold write.
+    await readModel($, s)
     if (line) $.ui.log(line)
     // The seeded clock decides whether a restored or always window pings before the first turn: never when it is cold.
     await arm($, s)
     return r
-  })
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'keepwarm' }, async ($, e) => {
     const words = String(e.args ?? '').trim().split(/\s+/).filter(Boolean)
@@ -418,7 +476,7 @@ export const register: Register = on => {
       return { text: armedText(s, now, DEFAULT_WINDOW_MS) }
     }
     if (words[0] !== 'status') {
-      const window = parseDuration(words[0])
+      const window = parseDuration(words[0] ?? '')
       if (window == null) return { text: 'keepwarm takes a window such as 6h or 90m, or always, off, or status' }
       // "every 2m" is a testing knob and lasts only for the window it was given with.
       let every = PING_AFTER_MS
@@ -445,14 +503,18 @@ export const register: Register = on => {
     return { text: card(s, now) }
   })
 
-  // The message that pays. Only its first character is read.
+  // The message that pays. Only its first character is read. Only the person
+  // can send a dropped prompt again, so only theirs is refused; any other (a
+  // background task's notification, a /loop or routine firing, a peer's
+  // message, an SDK prompt) is sent with the price shown, or it would be lost.
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'plugin') return next(e)
     if (typeof e.text !== 'string' || e.text.trimStart().startsWith('/')) return next(e)
+    await readModel($, s)
     const now = await $.clock.now()
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
-    if (s.guard === 'warn') {
-      $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
+    if (s.guard === 'warn' || !isPerson(e.origin)) {
+      const whose = isPerson(e.origin) ? '' : ` (a ${e.origin.kind} prompt, which nobody could send again)`
+      $.ui.log(`${guardText(s, now)} Sending anyway${whose}; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
       s.coldWritePending = true
       return next(e)
     }
@@ -463,11 +525,22 @@ export const register: Register = on => {
     }
     s.ackedAt = s.lastRequestAt
     return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(AUTO_WARM_MS)}. Or /clear and start from a note.` }
-  })
+  }).catch(($, e, next) => next(e)) // a guard that fails sends the prompt: dropping is the harm here
 
+  // Only a request to the session's own model keeps its cache warm: another
+  // plugin (auto-model) may send a step to another model.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) s.lastRequestAt = await $.clock.now()
-    yield* next(e)
+    if (e.agentId) return yield* next(e)
+    const at = await $.clock.now()
+    await readModel($, s)
+    const before = s.lastRequestAt
+    if (isOwn(s, e.model)) s.lastRequestAt = at
+    const r = yield* next(e)
+    // The model that answered decides: a plugin beneath may have sent the step elsewhere.
+    s.lastStepModel = r.usage?.model || e.model
+    if (isOwn(s, s.lastStepModel)) s.lastRequestAt = Math.max(s.lastRequestAt, at)
+    else if (s.lastRequestAt === at) s.lastRequestAt = before
+    return r
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -476,13 +549,17 @@ export const register: Register = on => {
     const now = await $.clock.now()
     // A sleeping host may deliver this turn before the expired window's timer.
     if (s.deadline && now >= s.deadline) await stop($, s, null)
+    const u = e.usage
+    // A turn another plugin sent to another model neither keeps the session
+    // model's cache warm nor pays for it.
+    const isOwnTurn = !u?.model || isOwn(s, u.model)
+    if (u?.model) s.lastStepModel = u.model
     // turn.step stamps the exact request time; when no step of this turn did, the turn's end is the floor.
-    if (now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
+    if (isOwnTurn && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
     s.compacted = false
     s.ackedAt = 0
-    const u = e.usage
     if (u) {
-      if (u.model) s.lastModel = u.model
+      if (u.model && isOwnTurn) s.lastModel = u.model
       const prev = s.ctx
       // A turn's usage is its responses summed, so a ten-step turn reports ten
       // reads of the context. The live window is the engine's figure; the sum
@@ -491,8 +568,8 @@ export const register: Register = on => {
       const live = (await $.session.usage()).context.tokens
       s.ctx = live && live > 0 ? live : u.input_tokens + u.cache_read_input_tokens + write
       const full = prev > 20000 && write >= 0.5 * prev
-      if (full || s.coldWritePending) {
-        const price = priceOf(s.lastModel)
+      if (isOwnTurn && (full || s.coldWritePending)) {
+        const price = ownPrice(s)
         const usd = price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
         if (s.deadline < now + AUTO_WARM_MS) {

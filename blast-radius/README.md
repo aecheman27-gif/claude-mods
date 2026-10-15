@@ -4,7 +4,7 @@ A Claude Code mod that holds a risky shell command and shows you what it would c
 
 ## What this shows
 
-When Claude calls Bash with one of the commands below, Blast Radius stops the call, works out what the command would touch, and opens a pane with two buttons: **Proceed** runs the command, **Cancel** refuses it. Claude sees the refusal and the reason.
+When Claude calls Bash (or Monitor, whose `command` is a shell command too) with one of the commands below, Blast Radius stops the call, works out what the command would touch, and opens a pane with two buttons: **Proceed** runs the command, **Cancel** refuses it. Claude sees the refusal and the reason.
 
 | Command | What the pane shows |
 |---|---|
@@ -15,6 +15,9 @@ When Claude calls Bash with one of the commands below, Blast Radius stops the ca
 | `git push --force` (also `-f`, `--force-with-lease`, `+ref`) | The commits on the remote branch that your HEAD doesn't have, which the push would drop. |
 | `manage.py migrate`, `db:migrate`, `alembic upgrade`, `prisma migrate` | The pending migrations, from the tool's own status command. |
 | any other `migrate` | A note that it can't list the pending migrations for that tool. |
+| `find -delete`, `find -exec rm`, `xargs rm -rf`, and `rm` of a path from `$VAR` or `$(...)` | Held, with a note that it couldn't measure: the paths are only known when the command runs. |
+
+It reads past wrappers (`sudo`, `env`, `nice`, `timeout`, `nohup`, `xargs`), into `bash -c "..."`, `sh -c '...'` and `eval "..."`, into `$(...)` and backticks, and across `;`, `&&`, `||`, `|` and a single `&`. `git push -fu` counts as a force push.
 
 Every other command runs as normal. If the command line moves first, with `cd dir &&`, `pushd`/`popd` or `git -C dir`, Blast Radius measures in that folder. A `cd` inside `( ... )` only applies inside the parentheses, as in the shell.
 
@@ -66,10 +69,10 @@ The second try, after Proceed:
 **Requirements:**
 
 - Claude Code 2.1.287 or later, where mods load by default. The mod was built and tested on 2.1.280, and `claude plugin validate` passes on 2.1.285.
-- `bash`, `git`, `find` and `du` on your `PATH`. For migrations, the project's own tool (for example `python3 manage.py showmigrations`).
+- `bash`, `git`, `find` and `du` on your `PATH`. On Windows, Git for Windows instead: the measuring and the hold's wait run in its Git Bash, found by path (`CLAUDE_CODE_GIT_BASH_PATH`, then `%ProgramFiles%\Git\bin\bash.exe`, then next to the `git` on `PATH`). The `bash` on `PATH`, often WSL's, is never used: it can't see Windows paths. If no Git Bash is found, `rm` isn't measured and a hold can wait only about 10 seconds for your answer before the command is refused. For migrations, the project's own tool (for example `python3 manage.py showmigrations`).
 - For the side pane, a terminal about 144 columns wide or more. Narrower terminals get the band above the prompt.
 
-No environment variables or configuration.
+No configuration. On Windows it reads `CLAUDE_CODE_GIT_BASH_PATH`, the variable Claude Code itself uses for Git Bash.
 
 **Steps:**
 
@@ -109,15 +112,17 @@ No environment variables or configuration.
 - In the band above the prompt, `1` or `2` works while the input is empty.
 - If nobody answers within 10 minutes, the command is refused.
 - If you interrupt the turn (Esc), the command is refused.
+- If anything goes wrong while holding (the wait or the hook itself fails), the command is refused rather than run.
 
 ## Notes / limitations
 
-- It reads the command text. It doesn't parse shell fully: `$(...)`, aliases, `eval`, `bash -c "..."`, `xargs rm`, `find -delete`, scripts that call `rm`, and wrappers such as `timeout 5 rm`, `doas rm`, `time -p rm` or `env -i rm` aren't caught.
+- It reads the command text. It doesn't parse shell fully: aliases, functions, scripts that call `rm`, and wrappers it doesn't know (`doas rm`, `time -p rm`) aren't caught. It errs toward holding: an `&`, `;` or `$(` inside quotes is read as if it weren't quoted.
 - Only the first risky part of a command line is measured, and the pane shows the command on one line, cut off if it's long. Proceed runs the whole line as written.
 - It follows `cd`, `pushd`, `popd` and `git -C` on the same line. `cd -`, and a folder that doesn't exist, can't be measured; the pane says so and still holds the command. Otherwise it starts from the session's working folder.
 - In a narrow terminal the report is drawn in the band above the prompt, which only one mod can use at a time. If another mod that draws there (such as Replay Theater or Token Weather in this folder) takes the band, the Proceed and Cancel buttons may not show, and the command is refused after 10 minutes. Use a wider terminal, or turn the other mod off, when you rely on Blast Radius.
 - One command is held at a time. A second risky call, from a subagent for example, waits until the first is answered.
-- It only watches the Bash tool. File edits and other tools aren't held.
+- It watches the Bash and Monitor tools. PowerShell, file edits and other tools aren't held.
+- If measuring fails (bash missing or erroring), the pane says it couldn't measure; it never reads a failure as "delete nothing".
 - The `rm` count is approximate: a path matched twice is counted twice, and a file name with a line break is not counted. The list shows the first 10 files. Counts come from `find` and sizes from `du -k`, so a size is the space on disk, to the nearest kilobyte. A very large tree can take a few seconds to measure.
 - The force-push list uses your last fetch of the remote branch. Without one, it can't list the dropped commits, and it says so. When the push names no remote, it assumes `origin`.
 - To list pending migrations, it runs the tool's own status command (for example `python3 manage.py showmigrations`), which loads your project's code before you choose Proceed or Cancel. If that fails, the pane says it couldn't list them.

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Pending } from '../types'
-import { ruleFrom, SKILL_HEADER, withRule } from './rules'
+import { ruleFrom, SKILL_HEADER, withoutImports, withRule } from './rules'
 
 // When a typed prompt reads like a correction, a band offers to keep it as a
 // rule: in ~/.claude/CLAUDE.md, the project's CLAUDE.md, or a learned-rules
@@ -30,7 +30,7 @@ async function pathFor($: EngineInterface, target: Target): Promise<string> {
 async function save($: EngineInterface, p: Pending, target: Target) {
   const path = await pathFor($, target)
   const before = (await $.fs.exists(path)) ? String(await $.fs.read(path)) : ''
-  const after = withRule(before, p.rule, target === 'skill' ? SKILL_HEADER : '')
+  const after = withRule(before, withoutImports(p.rule), target === 'skill' ? SKILL_HEADER : '')
   if (after === undefined) $.ui.toast(`reflect-lite: already in ${path}`)
   else {
     await $.fs.write(path, after)
@@ -53,13 +53,15 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const below = await next(e)
     const list = await read($, pending)
-    if (e.props.hasSurvey || list.length === 0) return below
-    const { Box, Button, Input, Text } = $.ui.resolve(e)
     const p = list[0]
+    if (e.props.hasSurvey || p === undefined) return below
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const Input = 'Input' in ui ? ui.Input : undefined // mobile has none
     const fail = (err: unknown) => $.ui.toast(`reflect-lite: could not save: ${err instanceof Error ? err.message : String(err)}`)
     const press = (target: Target) => () => void save($, p, target).catch(fail)
     const edited = (value: string) => {
-      const rule = value.replace(/\s+/g, ' ').trim()
+      const rule = withoutImports(value.replace(/\s+/g, ' ').trim())
       void update($, pending, all => all.map(x => (x.id === p.id ? { ...x, rule: rule || x.rule, isEditing: false } : x)))
     }
     const mine = (
@@ -68,7 +70,7 @@ export const register: Register = on => {
           <Text color="#FFB000" bold>
             [LEARN]{' '}
           </Text>
-          <Text wrap="truncate-end">
+          <Text wrap="wrap">
             Save as a rule? <Text color="white">"{p.rule}"</Text>
             {list.length > 1 ? <Text color="gray"> (+{list.length - 1} more)</Text> : ''}
           </Text>
