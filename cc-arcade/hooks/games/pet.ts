@@ -19,6 +19,26 @@ const BORED = 30
 
 export const newPet = (now: number): Pet => ({ xp: 0, mood: 70, at: now, born: now, tests: 0, fails: 0, commits: 0, edits: 0 })
 
+// a stored pet with its broken numbers mended. Builds up to 0.2.0 stored the clock's promise as `at`
+// and `born` (`{}` once saved) and could leave the mood null, while the xp and counts they kept are
+// good: the pet keeps every number that is sound and only the broken ones start over. Undefined when
+// what is stored is not a pet at all.
+export function repairPet(saved: unknown, now: number): Pet | undefined {
+  if (typeof saved !== 'object' || saved === null || Array.isArray(saved)) return undefined
+  const p = saved as Record<string, unknown>
+  const num = (v: unknown, fallback: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : fallback)
+  const at = num(p.at, now)
+  const pet: Pet = {
+    xp: num(p.xp, 0),
+    mood: Math.min(100, num(p.mood, 70)),
+    at,
+    born: num(p.born, at),
+    tests: num(p.tests, 0), fails: num(p.fails, 0), commits: num(p.commits, 0), edits: num(p.edits, 0),
+  }
+  if (typeof p.last === 'string' && Object.hasOwn(XP, p.last)) pet.last = p.last as PetEvent
+  return pet
+}
+
 // test runners across common stacks; a failing run is a tool call that ended in error
 const TEST_COMMAND = /\b(bun|npm|pnpm|yarn)\s+(run\s+)?test\b|\bnpx\s+(jest|vitest|mocha)\b|\b(pytest|jest|vitest|rspec|phpunit|mocha)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmake\s+test\b|\b(mvn|gradle|gradlew|sbt)\b.*\btest\b/
 

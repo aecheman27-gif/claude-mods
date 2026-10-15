@@ -2,7 +2,7 @@
 import type { Register } from 'claude-code'
 import { pickAuto, pickRandom, type AutoContext } from './games/auto.ts'
 import { isBetter } from './games/best.ts'
-import { feed, level, newPet, petEvent, stage, type Pet } from './games/pet.ts'
+import { feed, level, newPet, petEvent, repairPet, stage, type Pet } from './games/pet.ts'
 
 // One command, /arcade. With no argument it shows a picker above the prompt; `/arcade <game>` starts
 // a game, `random` picks one, `auto` picks one for the moment, `list` prints them, `stop` closes.
@@ -44,7 +44,8 @@ const best: Record<string, number> = {}
 let safe = false
 let pet: Pet | undefined
 
-// every number the pet is drawn and fed from: a pet stored with one broken (an older build wrote `{}`) hatches anew
+// every number the pet is drawn and fed from: a pet stored with one broken (an older build wrote `{}`)
+// is mended by repairPet, keeping its xp, and stored again
 const isPet = (value: unknown): value is Pet =>
   typeof value === 'object' && value !== null && [(value as Pet).xp, (value as Pet).mood, (value as Pet).at, (value as Pet).born].every(Number.isFinite)
 const autoContext = (now: number): AutoContext => ({
@@ -62,7 +63,8 @@ export const register: Register = on => {
     // an unhandled rejection here would unmount the whole module
     const stored = (key: string) => $.store.get(key).catch(err => { $.ui.log(`cc-arcade: store read failed: ${err}`); return undefined })
     const saved = await stored('pet')
-    pet = isPet(saved) ? saved : newPet(await $.clock.now())
+    const now = await $.clock.now()
+    pet = repairPet(saved, now) ?? newPet(now)
     if (!isPet(saved)) await $.store.set('pet', pet).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
     for (const name of NAMES) {
       const score = Number(await stored(`best:${name}`))
@@ -146,7 +148,7 @@ export const register: Register = on => {
     if (!event) return r
     const saved = await $.store.get('pet').catch(() => undefined)
     const now = await $.clock.now()
-    const current = isPet(saved) ? saved : pet ?? newPet(now)
+    const current = repairPet(saved, now) ?? pet ?? newPet(now)
     const fed = feed(current, event, now)
     pet = fed
     await $.store.set('pet', fed).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
