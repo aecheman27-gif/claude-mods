@@ -11,9 +11,10 @@ param([string]$Out = (Join-Path ([Environment]::GetFolderPath('Desktop')) "claud
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$skip = '^(reflect-mod/|[^/]+/(docs|site|media|screenshots|tools|scripts|\.github|\.claude)/)|\.(gif|png|mp4|woff2?|svg)$'
+$skip = '^(reflect-mod/|[^/]+/(docs|site|media|screenshots|tools|scripts|\.github|\.githooks|\.claude)/)|\.(gif|png|mp4|woff2?|svg)$'
 
 $dirty = git -C $repo status --porcelain
+if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
 if ($dirty) { Write-Host "Note: uncommitted changes are left out of the zip:`n$($dirty -join "`n")" -ForegroundColor Yellow }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "claude-mods-work-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -23,7 +24,9 @@ git -C $repo archive --format=zip -o (Join-Path $tmp 'head.zip') HEAD
 if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
 Expand-Archive (Join-Path $tmp 'head.zip') -DestinationPath $stage
 $kept = 0
-foreach ($f in @(git -C $repo ls-tree -r --name-only HEAD)) {
+$files = @(git -C $repo ls-tree -r --name-only HEAD)
+if ($LASTEXITCODE -ne 0) { throw 'git ls-tree failed' }   # an empty list would ship reflect-mod, docs and media
+foreach ($f in $files) {
   if ($f -match $skip) { Remove-Item -LiteralPath (Join-Path $stage $f) } else { $kept++ }
 }
 Get-ChildItem $stage -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending |
@@ -38,5 +41,6 @@ $json.plugins = @($json.plugins | Where-Object { $_.name -ne 'reflect-mod' })
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $Out
 $commit = git -C $repo rev-parse --short HEAD
+if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
 Write-Host "Built $Out from commit ${commit}: $kept files, $([math]::Round((Get-Item -LiteralPath $Out).Length / 1KB)) KB"
 Write-Host "Staging copy: $stage"
