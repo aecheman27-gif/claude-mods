@@ -1,7 +1,7 @@
 {
   "name": "chat-bubbles",
-  "version": "0.1.8-mc.1",
-  "description": "Messenger-style chat for Claude Code: your prompts on the right in a rival color, Claude on the left, only running or failing tools stand out. 441 themes. (Vendored from github.com/angeldelbiondo/claude-chat-bubbles @ 5597448, MIT. Modified for my-claude-mods: the footer keeps the row beneath, so plan-progress's button stays.)",
+  "version": "0.1.8-mc.2",
+  "description": "Messenger-style chat for Claude Code: your prompts on the right in a rival color, Claude on the left, only running or failing tools stand out. 441 themes. (Vendored from github.com/angeldelbiondo/claude-chat-bubbles @ 5597448, MIT. Modified for my-claude-mods: the footer keeps the row beneath, so plan-progress's button stays; other mods' panes get the backdrop without side padding; an empty tool result gets no stripe; the spinner shimmers from the main turn's start to its end.)",
   "author": {
     "name": "Angel Del Biondo",
     "url": "https://github.com/angeldelbiondo"

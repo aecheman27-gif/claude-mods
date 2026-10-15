@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { byOwnShell, keyOf, remembered } from './register'
+import { byOwnShell, keyOf, mcpPaths, named, remembered, writes } from './register'
 
 const MIN = 60_000
 const NOW = Date.parse('2026-10-08T20:00:00Z')
@@ -14,16 +14,17 @@ function world(on: On, mtimes: Record<string, number>, answer: Answer = 'Cancel'
     on('clock.now', async () => {
       throw new Error('boom')
     })
-  const w = { asked: [] as string[], ran: [] as string[], mtimes, clock }
+  const w = { asked: [] as string[], ran: [] as string[], mtimes, clock, answer }
   on('fs.stat', async ($, e) => {
     const m = mtimes[e.path.replace(/\\/g, '/')]
     if (m === undefined) throw new Error('ENOENT')
     return { value: { kind: 'file', size: 1, mtimeMs: m, isLink: false } } as never
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e) => {
-    w.asked.push(e.questions[0].question)
-    if (answer === 'close') return { deny: 'dismissed' }
-    return { result: { questions: e.questions, answers: { [e.questions[0].question]: answer } } } as never
+    const question = e.questions[0]?.question ?? ''
+    w.asked.push(question)
+    if (w.answer === 'close') return { deny: 'dismissed' }
+    return { result: { questions: e.questions, answers: { [question]: w.answer } } } as never
   })
   on('tool.call', async ($, e) => {
     w.ran.push(e.tool)
@@ -122,6 +123,63 @@ describe('gate', () => {
     expect(r.deny).toContain('check failed')
     expect(w.ran).toEqual([])
   })
+
+  test('Cancel sticks: reading the file does not let the next edit through unasked; Edit anyway clears it', async ($, on) => {
+    const w = world(on, { 'C:/shared/plan.md': NOW - 2 * MIN })
+    expect((await edit($, 'C:/shared/plan.md')).deny).toContain('do not change it another way (a shell command')
+    await $.tool.call({ tool: 'Read', file_path: 'C:/shared/plan.md' } as never)
+    expect((await edit($, 'C:/shared/plan.md')).deny).toContain('did not approve')
+    expect(w.asked).toHaveLength(2)
+    w.answer = 'Edit anyway'
+    expect((await edit($, 'C:/shared/plan.md')).deny).toBeUndefined()
+    await edit($, 'C:/shared/plan.md')
+    expect(w.asked).toHaveLength(3)
+    expect(w.ran).toEqual(['Read', 'Edit', 'Edit'])
+  })
+
+  test('a Cancel ages out with the window', async ($, on) => {
+    const w = world(on, { 'C:/shared/plan.md': NOW - 2 * MIN })
+    await edit($, 'C:/shared/plan.md')
+    await w.clock?.advance(9 * MIN)
+    await edit($, 'C:/shared/plan.md')
+    expect(w.asked).toHaveLength(1)
+    expect(w.ran).toEqual(['Edit'])
+  })
+
+  test('a shell command that writes a recently changed file asks first; one that only reads it does not', async ($, on) => {
+    const w = world(on, { 'C:/shared/plan.md': NOW - 2 * MIN, 'C:/shared/notes.txt': NOW - 2 * MIN })
+    const shell = (tool: string, command: string) => $.tool.call({ tool, command } as never) as Promise<{ deny?: string }>
+    const refused = [
+      await shell('PowerShell', "(Get-Content C:\\shared\\plan.md) -replace 'a','b' | Set-Content C:\\shared\\plan.md"),
+      await shell('Bash', "sed -i 's/a/b/' C:/shared/plan.md"),
+      await shell('Bash', `python -c "open('C:/shared/notes.txt','w').write('x')"`),
+    ]
+    for (const r of refused) expect(r.deny).toContain('did not approve')
+    await shell('Bash', 'cat C:/shared/plan.md')
+    expect(w.asked).toHaveLength(3)
+    expect(w.ran).toEqual(['Bash'])
+  })
+
+  test("a long command of Claude's that only reads a file does not make an outside edit to it its own", async ($, on) => {
+    const mtimes = { 'C:/lab/run.yaml': NOW - 20 * MIN }
+    on('tool.call', { tool: 'Bash' }, async () => {
+      mtimes['C:/lab/run.yaml'] = NOW // the person retunes the config while the acquisition runs
+      return { result: { stdout: '', stderr: '', interrupted: false } } as never
+    })
+    const w = world(on, mtimes)
+    await $.tool.call({ tool: 'Bash', command: 'python run_daq.py --config C:\\lab\\run.yaml' } as never)
+    await edit($, 'C:/lab/run.yaml')
+    expect(w.asked).toHaveLength(1)
+  })
+
+  test('an MCP tool that writes a recently changed file asks; one that reads it does not', async ($, on) => {
+    const w = world(on, { 'C:/shared/plan.md': NOW - 2 * MIN })
+    const r = (await $.tool.call({ tool: 'mcp__filesystem__write_file', path: 'C:/shared/plan.md', content: 'x' } as never)) as { deny?: string }
+    expect(r.deny).toContain('did not approve')
+    await $.tool.call({ tool: 'mcp__filesystem__read_text_file', path: 'C:/shared/plan.md' } as never)
+    expect(w.asked).toHaveLength(1)
+    expect(w.ran).toEqual(['mcp__filesystem__read_text_file'])
+  })
 })
 
 test('helpers', async () => {
@@ -133,6 +191,19 @@ test('helpers', async () => {
   expect(byOwnShell(1000, 'C:/w/a.py', w('npm test'))).toBe(false)
   expect(byOwnShell(1000, 'C:/w/a.py', w('cat data.py'))).toBe(false)
   expect(byOwnShell(1000, '/home/A.py', w('black /home/a.py'))).toBe(false)
+  expect(byOwnShell(1000, 'C:/lab/run.yaml', w('python run_daq.py --config C:\\lab\\run.yaml'))).toBe(false)
+  expect(byOwnShell(1000, 'C:/lab/run.yaml', w('Set-Content C:\\lab\\run.yaml $x'))).toBe(true)
+  for (const c of ['Set-Content a.txt x', "sed -i 's/a/b/' a.txt", 'echo hi > out.txt', 'perl -pi -e s/a/b/ a.txt', `python -c "open('a.txt','w').write('x')"`, 'ruff format a.py', 'prettier --write a.ts', 'Copy-Item a.txt b.txt', 'git checkout -- a.txt']) {
+    expect(writes(c), c).toBe(true)
+  }
+  for (const c of ['npm test 2>&1', 'cat plan.md', 'git diff plan.md', 'python run_daq.py --config run.yaml', 'node -e "[1].map(x => x)"', 'dir > $null', 'sed -n 1p a.txt', 'ruff check a.py']) {
+    expect(writes(c), c).toBe(false)
+  }
+  expect(named(`Set-Content -Path "C:\\My Files\\a.txt" -Value 1; sed -i 's/x/y/' b.md`)).toEqual(['C:\\My Files\\a.txt', 'b.md'])
+  expect(named('curl -o out.json https://example.test/data.json')).toEqual(['out.json'])
+  expect(mcpPaths('mcp__fs__move_file', { source: 'C:/a.txt', destination: 'C:/b.txt' })).toEqual(['C:/a.txt', 'C:/b.txt'])
+  expect(mcpPaths('mcp__fs__read_file', { path: 'C:/a.txt' })).toEqual([])
+  expect(mcpPaths('Write', { file_path: 'C:/a.txt' })).toEqual([])
 })
 
 test('seen keeps only recent versions, at most 500', async () => {

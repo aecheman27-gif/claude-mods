@@ -96,3 +96,31 @@ export function restore(text: string, vault: Record<string, string>): { text: st
   })
   return { text: out, n }
 }
+
+// Anything shaped like a placeholder, a mistyped one included: the shape rules.ts never matches inside.
+export const SHAPED = /\[REDACTED:[A-Z0-9_]{1,64}#[0-9a-fA-F]{1,64}\]/g
+
+export function shaped(text: string): string | undefined {
+  return text.match(new RegExp(SHAPED.source))?.[0]
+}
+
+// as written, JSON-escaped (a notebook's source) or with CRLF line ends
+function holds(file: string, value: string): boolean {
+  return file.includes(value) || file.includes(JSON.stringify(value).slice(1, -1)) || file.includes(value.replace(/\r?\n/g, '\r\n'))
+}
+
+export type Refusal = { placeholder: string; isKnown: boolean }
+
+// The first placeholder a restore into this file must refuse: a known one whose value the file does not
+// already hold, since restoring it would carry a hidden value somewhere new (a script Claude then runs, a
+// file curl uploads, a memory note), or an unknown one (an earlier session's, or mistyped) the file does not
+// already hold as text, since it would land there literally.
+export function refused(texts: readonly string[], vault: Record<string, string>, file: string): Refusal | undefined {
+  for (const text of texts) {
+    for (const m of text.matchAll(SHAPED)) {
+      const real = vault[m[0]]
+      if (real === undefined ? !file.includes(m[0]) : !holds(file, real)) return { placeholder: m[0], isKnown: real !== undefined }
+    }
+  }
+  return undefined
+}

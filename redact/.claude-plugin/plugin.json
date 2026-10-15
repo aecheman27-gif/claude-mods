@@ -1,7 +1,7 @@
 {
   "name": "redact",
-  "version": "0.1.0",
-  "description": "Redacts secrets and PII from every row Claude Code stores, before the model reads it and before the transcript keeps it. Reach L0: no network, no processes, no files.",
+  "version": "0.2.0",
+  "description": "Redacts secrets and PII from every row Claude Code stores and from the CLAUDE.md and memory context, before the model reads it and before the transcript keeps it. Restores a value only into a file that already holds it. No network, no processes, no file writes.",
   "author": { "name": "Karan Bansal", "url": "https://github.com/karanb192" },
   "homepage": "https://redact.aidojo.si",
   "repository": "https://github.com/karanb192/claude-code-redact",

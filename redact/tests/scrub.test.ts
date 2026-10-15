@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { ApiContentBlock } from 'claude-code'
-import { PLACEHOLDER, WITHHELD, fnv1a, redactBlocks, redactText, restore, tally, describe as describeCounts, withhold, type Settings } from '../hooks/scrub'
+import { PLACEHOLDER, WITHHELD, fnv1a, redactBlocks, redactText, refused, restore, shaped, tally, describe as describeCounts, withhold, type Settings } from '../hooks/scrub'
 
 const KEY = 'AKIAQ4ZKX7TR2MDPLW5B'
 const EMAIL = 'jane.doe@example.com'
@@ -89,6 +89,25 @@ describe('restore', () => {
     const p = at(r.pairs)[0]
     expect(restore(`SECRET=${p}\n# ${p}`, vault)).toEqual({ text: `SECRET=${KEY}\n# ${KEY}`, n: 2 })
     expect(restore('v=[REDACTED:AWS_KEY#00000000]', vault)).toEqual({ text: 'v=[REDACTED:AWS_KEY#00000000]', n: 0 })
+  })
+
+  test('refused names the first placeholder the file does not already hold, by value or as text', async () => {
+    const r = redactText(`SECRET=${KEY}`, SALT, cfg())
+    const vault = Object.fromEntries(r.pairs)
+    const p = at(r.pairs)[0]
+    expect(refused([`SECRET=${p}`], vault, `SECRET=${KEY}\n`)).toBeUndefined()
+    expect(refused(['clean', `SECRET=${p}`], vault, 'other')).toEqual({ placeholder: p, isKnown: true })
+    expect(refused(['v=[REDACTED:AWS_KEY#00000000]'], vault, 'doc: [REDACTED:AWS_KEY#00000000]')).toBeUndefined()
+    expect(refused(['v=[REDACTED:AWS_KEY#0000]'], vault, '')).toEqual({ placeholder: '[REDACTED:AWS_KEY#0000]', isKnown: false })
+    // a multi-line value in a file with CRLF line ends, and one with a quote in a JSON file
+    const lines = { '[REDACTED:PRIVATE_KEY#12345678]': 'k1\nk2', '[REDACTED:SECRET#87654321]': 'a"b9Zq' }
+    expect(refused(['[REDACTED:PRIVATE_KEY#12345678]'], lines, 'x\r\nk1\r\nk2\r\n')).toBeUndefined()
+    expect(refused(['[REDACTED:SECRET#87654321]'], lines, '{"source": ["a\\"b9Zq"]}')).toBeUndefined()
+  })
+
+  test('shaped finds a placeholder, a mistyped one included', async () => {
+    expect(shaped("sed 's/[REDACTED:SECRET#abc]/x/' .env")).toBe('[REDACTED:SECRET#abc]')
+    expect(shaped('git status')).toBeUndefined()
   })
 })
 

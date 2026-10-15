@@ -5,7 +5,7 @@
 // Forked from Theme Studio by Alliance Optima (MIT).
 
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderNode, Timer } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderElement, RenderNode, Timer } from 'claude-code'
 
 import type { BaseMode, MessageStyle, Palette, PromptStyle } from '../types'
 import { isHex, loopGradient, normalizeHex } from './color'
@@ -218,6 +218,16 @@ async function openStudio($: EngineInterface) {
 
 // ── Pure drawing helpers ─────────────────────────────────────────────────
 
+/** A tree that draws nothing: an empty string, or Boxes that hold nothing and take no room of their own. */
+const blank = (node: RenderNode | null | undefined): boolean =>
+  node === null ||
+  node === undefined ||
+  node === '' ||
+  (typeof node === 'object' &&
+    node.type === 'Box' &&
+    !Object.keys(node.props ?? {}).some(k => /height|padding|margin|border/i.test(k)) &&
+    (node.children ?? []).every(blank))
+
 const formatDuration = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
@@ -240,6 +250,7 @@ const listing = (collection?: string, mine: readonly Palette[] = []) => {
 
 export const register: Register = on => {
   let tick: Timer | null = null
+  let mainTurn = ''
   const stopShimmer = () => {
     tick?.cancel()
     tick = null
@@ -263,8 +274,11 @@ export const register: Register = on => {
     return done
   })
 
-  on('prompt.submit', async ($, e, next) => {
+  // The spinner shimmers while the main loop's turn runs: from its turn.start (a local slash command or a
+  // dropped prompt starts none, and a subagent's run raises none) to its own end, never a subagent's.
+  on('turn.start', async ($, e, next) => {
     stopShimmer()
+    mainTurn = e.turnId
     if ((await chromeLook($)) && !(await read($, reducedMotion))) {
       tick = $.clock.every(SHIMMER_MS, () => void update($, frame, f => (f + 1) % 960))
     }
@@ -272,9 +286,14 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    stopShimmer()
+    if (!e.agentId) stopShimmer()
     return next(e)
   })
+
+  on('turn.abort', async ($, e, next) => {
+    if (e.turnId === mainTurn) stopShimmer()
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'bubbles' }, async ($, e) => {
     const [verb = '', ...rest] = e.args.trim().split(/\s+/)
@@ -507,8 +526,9 @@ export const register: Register = on => {
     )
   })
 
-  // Tool rows, folded runs, results and command output: a stripe and a strip.
-  const striped = (look: Look, mark: string, drawn: RenderNode, K: Pick<ElementTable, 'Box' | 'Text'>, strength = 0.1, glyph = '▍') => (
+  // Tool rows, folded runs, results and command output: a stripe and a strip. A tree that draws nothing
+  // (another mod hiding the row with an empty Box) stays as it is: a stripe around it would add a line.
+  const striped = (look: Look, mark: string, drawn: RenderElement, K: Pick<ElementTable, 'Box' | 'Text'>, strength = 0.1, glyph = '▍') => blank(drawn) ? drawn : (
     <K.Box flexDirection="row" backgroundColor={strength > 0 ? stripOf(look, mark, strength) : undefined}>
       <K.Text bold color={mark}>
         {glyph}
@@ -591,13 +611,14 @@ export const register: Register = on => {
     )
   })
 
-  // Every pane a mod opens, this one included: a tinted backdrop.
+  // Every pane a mod opens, this one included: a tinted backdrop. Only the studio gets side padding: another
+  // mod sizes its pane to bodyColumns, and two columns less would clip it.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     const current = await chromeLook($)
     if (!current) return next(e)
     const { Box } = $.ui.resolve(e)
     return (
-      <Box flexDirection="column" backgroundColor={current.look.replyBg} paddingX={1}>
+      <Box flexDirection="column" backgroundColor={current.look.replyBg} paddingX={e.requestId === PANE ? 1 : 0}>
         {await next(e)}
       </Box>
     )

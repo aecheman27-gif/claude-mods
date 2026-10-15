@@ -151,6 +151,15 @@ const DB_URLS = [
 ] as const
 const BEARER = cat('B7U3ts9mwuLTxQYen8gvFVIks', 'TqnsCWhAV3vAUlr')
 const BASIC = cat('dXNlcjpwYXNz', 'd29yZDEyMw==')
+// generic values for the config, XML, ODBC and command-line rules
+const PW = [
+  cat('Xk9#mQ2', '!vR4pL'),
+  cat('Tz7Wq2', 'Lp9Vx4'),
+  cat('Hq3$Zr8', 'Nw1!Kd'),
+  cat('9fQ2xLm', 'Z7vB4kT'),
+  cat('Rt5@wq', 'X8nL2z'),
+  cat('Lm4$Qw', '9zR!t2'),
+] as const
 
 const SECRET_CASES: Case[] = [
   {
@@ -515,6 +524,11 @@ const SECRET_CASES: Case[] = [
       'password: "%(db_password)s"',
       '"api_key": "{{ secrets.API_KEY }}"',
       "token: '<paste-token-here>'",
+      'env: { token: "GITHUB_TOKEN", password: "DB_PASSWORD_V2" }',
+      cat('PyPI upload token: `', PYPI_PREFIX, '` plus at least 50 characters'),
+      'Set auth: `useOAuthFlow` and password: `settings.dbPassword` in the client.',
+      cat('token: "', 'gh', 'p_', 'short"'),
+      '<add key="ClientSecret" value="#{ClientSecret}#" />',
     ],
   },
   {
@@ -550,6 +564,104 @@ const SECRET_CASES: Case[] = [
       String.raw`    'WINDIR="C:\\\\Users\\\\me\\\\"\nAPI_KEY=secret\nPORT=3000\n',`,
       String.raw`const RPayload = dotenv.parse(Buffer.from('SERVER=localhost\rPASSWORD=password\rDB=tests\r'))`,
       String.raw`const RNPayload = dotenv.parse(Buffer.from('SERVER=localhost\r\nPASSWORD=password\r\nDB=tests\r\n'))`,
+      'password=$env:DB_PASS',
+      'LAB_API_KEY=LAB_API_KEY_V2',
+    ],
+  },
+  {
+    id: 'generic-secret-escaped',
+    label: 'SECRET',
+    positives: [
+      { text: cat('"    \\"password\\": \\"', PW[0], '\\",\\n",'), value: PW[0] },
+      { text: cat('"source": ["api_key = \\"', PW[1], '\\"\\n"]'), value: PW[1] },
+      { text: cat('{"text":"{\\"client_secret\\":\\"', PW[2], '\\"}"}'), value: PW[2] },
+    ],
+    negatives: [
+      '"    \\"password\\": \\"changeme\\",\\n",',
+      '{\\"token\\": \\"GITHUB_TOKEN\\"}',
+      '\\"api_key\\": \\"<your-api-key>\\"',
+      '\\"auth\\": \\"same-origin\\"',
+    ],
+  },
+  {
+    id: 'xml-config-secret',
+    label: 'SECRET',
+    positives: [
+      { text: `<add key="DbPassword" value="${PW[0]}" />`, value: PW[0] },
+      { text: `<add key="Smtp.ApiKey" value="${PW[3]}"/>`, value: PW[3] },
+      { text: `  <add key='ClientSecret' value='${PW[4]}' />`, value: PW[4] },
+    ],
+    negatives: [
+      '<add key="TokenLifetimeMinutes" value="30" />',
+      '<add key="TokenAudience" value="api://lab-runner" />',
+      '<add key="DbPassword" value="" />',
+      '<add key="ApiKey" value="%API_KEY%" />',
+      '<add key="SmtpPassword" value="{SmtpPassword}" />',
+    ],
+  },
+  {
+    id: 'xml-element-secret',
+    label: 'SECRET',
+    positives: [
+      { text: `<password>${PW[0]}</password>`, value: PW[0] },
+      { text: `  <DbPassword>${PW[5]}</DbPassword>`, value: PW[5] },
+      { text: `<ns:client_secret>${PW[3]}</ns:client_secret>`, value: PW[3] },
+    ],
+    negatives: [
+      '<passwordPolicy>StrongPolicy1</passwordPolicy>',
+      '<password>${DB_PASSWORD}</password>',
+      '<secret>my-app-secret</secret>',
+      '<token>GITHUB_TOKEN</token>',
+      '<accessToken></accessToken>',
+    ],
+  },
+  {
+    id: 'odbc-password',
+    label: 'SECRET',
+    positives: [
+      { text: cat('Driver={ODBC Driver 18 for SQL Server};Server=lab01;UID=sa;PWD={', 'p@ss;w0rd}}X', '};'), value: 'p@ss;w0rd}}X' },
+      { text: cat('Password={', PW[1], '}'), value: PW[1] },
+      { text: cat('conn = "DSN=lab;Uid=admin;Pwd={', PW[4], '};"'), value: PW[4] },
+    ],
+    negatives: [
+      '$"Server={host};UID={user};PWD={pwd};"',
+      'PWD={0};',
+      'Password={password};',
+      '$"PWD={settings.DbPassword};"',
+    ],
+  },
+  {
+    id: 'flag-secret',
+    label: 'SECRET',
+    positives: [
+      { text: `docker login --password ${PW[1]} registry.lab`, value: PW[1] },
+      { text: `New-LocalUser -Name lab -Password "${PW[2]}"`, value: PW[2] },
+      { text: `Connect-Lab -Token '${PW[3]}' -Verbose`, value: PW[3] },
+      { text: `mytool --api-key ${PW[5]}`, value: PW[5] },
+    ],
+    negatives: [
+      'gh auth login --with-token < token.txt',
+      'docker login --password-stdin',
+      'New-LocalUser -Name lab -Password $secure',
+      'mytool --token "$env:LAB_TOKEN"',
+      'Pass --token followed by the value.',
+      'docker build --secret id=npmrc,src=.npmrc .',
+      'Connect-Lab -Token $cred.Token',
+    ],
+  },
+  {
+    id: 'sqlcmd-password',
+    label: 'SECRET',
+    positives: [
+      { text: cat('sqlcmd -S lab01 -U sa -P ', 'Lab#2026', 'pw -Q "SELECT 1"'), value: cat('Lab#2026', 'pw') },
+      { text: `bcp dbo.Runs out runs.csv -c -S lab01 -U loader -P"${PW[4]}"`, value: PW[4] },
+      { text: `SQLCMD.EXE -E -S . -P ${PW[3]}`, value: PW[3] },
+    ],
+    negatives: [
+      'sqlcmd -S lab01 -E -Q "SELECT 1"',
+      'grep -P "\\d{3}-\\d{4}" log.txt',
+      'mysql -h db -P 3306 -u root',
+      'sqlcmd -S lab01 -U sa -P $env:SQL_PW',
     ],
   },
 ]

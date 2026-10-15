@@ -1,6 +1,6 @@
-import type { EngineInterface, PluginOptions, Register, SessionAppendInput } from 'claude-code'
+import type { EngineInterface, PluginOptions, PromptContextResult, Register, SessionAppendInput } from 'claude-code'
 import { atom, read, update } from 'claude-code'
-import { describe, fnv1a, redactBlocks, redactText, restore, tally, withhold, type Settings } from './scrub'
+import { WITHHELD, describe, fnv1a, redactBlocks, redactText, refused, restore, shaped, tally, withhold, type Refusal, type Settings } from './scrub'
 
 const vault = atom({ plugin: 'redact', key: 'vault' } as const, {} as Record<string, string>)
 const salt = atom({ plugin: 'redact', key: 'salt' } as const, '')
@@ -10,9 +10,32 @@ const restored = atom({ plugin: 'redact', key: 'restored' } as const, 0)
 const NOTE = [
   'Redaction notice: strings shaped like [REDACTED:LABEL#hex] are placeholders a local redactor inserted',
   'in place of secrets and personal data before you saw them. The real value is restored only when a',
-  'placeholder is passed verbatim in Edit, Write or NotebookEdit arguments. Never ask the person for the',
-  'hidden value, never try to reconstruct it, and never rely on a placeholder in a shell command.',
+  'placeholder is passed verbatim in Edit, Write or NotebookEdit arguments for a file that already holds',
+  'that value; a call that would carry it into any other file, or that uses a placeholder from an earlier',
+  'session, is refused. Never ask the person for the hidden value, never try to reconstruct it, and never',
+  'put a placeholder in a shell command (such calls are refused): change a line that holds one with Edit.',
 ].join(' ')
+
+const RESTORE_FAILED = 'redact: the placeholder check failed, so this call was blocked rather than run with placeholders or a hidden value.'
+
+function refusal(r: Refusal, path: string): string {
+  if (r.isKnown) {
+    return `redact: ${r.placeholder} stands for a hidden value that ${path} does not already hold, so the call was refused. A hidden value is put back only into a file that already contains it (an edit that keeps an existing secret), never carried into a new file, script or note. Leave that value out, or ask the person to add it themselves.`
+  }
+  return `redact: ${r.placeholder} is a placeholder from an earlier session (redact forgets its values on /clear, /resume and restart), or one it never made, so it would land in ${path} as literal text. Re-read the source file to get a current placeholder, then retry.`
+}
+
+// The context blocks with every text scanned. A rewritten claudeMd text leaves the files behind it unknown
+// from here up (the engine drops the list), which is the price of sending only text this hook has scanned:
+// a changed list instead would have the engine render the text again, out of this hook's sight.
+async function scrubContext($: EngineInterface, r: PromptContextResult, cfg: Settings): Promise<PromptContextResult> {
+  const s = await ensureSalt($)
+  const blocks = r.blocks.map(b => ({ b, red: redactText(b.text, s, cfg) }))
+  const hits = blocks.flatMap(x => x.red.hits)
+  if (hits.length === 0) return r
+  await remember($, blocks.flatMap(x => x.red.pairs), tally(hits), cfg, 'CLAUDE.md and memory')
+  return { blocks: blocks.map(x => (x.red.hits.length ? { ...x.b, text: x.red.text } : x.b)) }
+}
 
 const DOORS: Record<string, string> = {
   'prompt': 'your prompt',
@@ -88,8 +111,36 @@ export const register: Register = (on, options) => {
     return next({ ...e, message: { ...e.message, content: withhold(e.message.content) } })
   })
 
+  // CLAUDE.md, its @-imports and auto-memory ride the first user message as context blocks, never as a
+  // stored row, so session.append never sees them: they are scanned here, on the way up.
+  on('prompt.context', async ($, e, next) => scrubContext($, await next(e), cfg)).catch(async ($, e, next) => {
+    const r = await next(e)
+    $.ui.log('scanning failed, so CLAUDE.md and memory were withheld from the model')
+    return { blocks: r.blocks.map(b => ({ ...b, text: WITHHELD })) }
+  })
+
+  on('prompt.section', { name: 'memory' }, async ($, e, next) => {
+    const r = await next(e)
+    if (!r.text) return r
+    const red = redactText(r.text, await ensureSalt($), cfg)
+    if (red.hits.length === 0) return r
+    await remember($, red.pairs, tally(red.hits), cfg, 'the memory section')
+    return { text: red.text }
+  }).catch(async ($, e, next) => {
+    await next(e)
+    return { text: WITHHELD }
+  })
+
+  // A value is put back only into a file that already holds it, so a placeholder never carries a hidden
+  // value somewhere new; one the vault does not know is refused rather than written as literal text.
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
+    const args = e.tool === 'Edit' ? [e.old_string, e.new_string] : e.tool === 'Write' ? [e.content] : e.tool === 'NotebookEdit' ? [e.new_source] : []
+    if (!args.some(a => shaped(a) !== undefined)) return next(e)
+    const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     const v = await read($, vault)
+    const file = await $.fs.read(path).catch(() => '') // a new file holds nothing
+    const bad = refused(args, v, file)
+    if (bad) return { deny: refusal(bad, path) }
     if (e.tool === 'Edit') {
       const o = restore(e.old_string, v)
       const n = restore(e.new_string, v)
@@ -110,7 +161,17 @@ export const register: Register = (on, options) => {
       return next({ ...e, new_source: c.text })
     }
     return next(e)
-  })
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED }))
+
+  // A shell never gets the real value, and in -replace, sed or grep the brackets read as a character class
+  // that rewrites the wrong text, so a command naming a placeholder is refused, never run.
+  on('tool.call', { tool: ['Bash', 'PowerShell', 'Monitor'] }, async ($, e, next) => {
+    const p = shaped(String(e.command ?? ''))
+    if (p === undefined) return next(e)
+    return {
+      deny: `redact: this command contains the placeholder ${p}. A shell never gets the hidden value, and in -replace, sed or grep its brackets act as a character class and change the wrong text. To change a line that holds a hidden value, use Edit with the placeholder in old_string and new_string.`,
+    }
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED }))
 
   on('prompt.section', { name: 'env_info_simple' }, async ($, e, next) => {
     const r = await next(e)

@@ -1,7 +1,7 @@
 // Engine tests: the plugin loaded by the engine's own host, its hooks drawn on
 // the surfaces a person uses.
 
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import { ENGINE_ROW, id, store } from './helpers'
@@ -199,4 +199,105 @@ describe('drawing', () => {
       expect(await ui.find({ type: 'Text', text: 'engine row' })).toBeTruthy()
     })
   }
+})
+
+describe('chrome around the engine and other mods', () => {
+  const props = (node: unknown) => (node as { props?: Record<string, unknown> }).props ?? {}
+
+  for (const surface of SURFACES) {
+    test(`another mod's pane gets the backdrop but no side padding, so its bodyColumns still fit, on ${surface}`, ENGINE, async ($, on) => {
+      // Stand in for another mod's pane drawn beneath (plan-progress, sized to bodyColumns).
+      on('ui.render', { component: 'Pane' }, ($, e) => {
+        const { Text } = $.ui.resolve(e)
+        return <Text>other mod</Text>
+      })
+      await theme($, 'dracula')
+      const ui = await $.ui.mount({
+        plugin: 'chat-bubbles',
+        surface,
+        component: 'Pane',
+        requestId: 'plan-progress',
+        // the props this test reads; the pane's scroll and view do not matter here
+        props: { title: 'Progress', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
+      })
+      const drawn = await ui.drawn()
+      expect(props(drawn).backgroundColor).toBeTruthy()
+      expect(props(drawn).paddingX ?? 0).toBe(0)
+      expect(await ui.find({ type: 'Text', text: 'other mod' })).toBeTruthy()
+    })
+  }
+
+  test('the studio pane keeps its side padding', ENGINE, async $ => {
+    await theme($, 'dracula')
+    const ui = await $.ui.mount({
+      plugin: 'chat-bubbles',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'chat-bubbles',
+      props: { title: 'Chat Bubbles', isFocused: true, bodyColumns: 64, placement: 'dock' } as never,
+    })
+    expect(props(await ui.drawn()).paddingX).toBe(1)
+  })
+
+  test('an empty tool result another mod drew stays empty: no stripe line under the tool row', ENGINE, async ($, on) => {
+    // Stand in for mission-control's /clean, which hides the result with an empty Box.
+    on('ui.render', { component: 'ToolResult' }, ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return <Box />
+    })
+    await theme($, 'dracula')
+    const ui = await $.ui.mount({
+      plugin: 'chat-bubbles',
+      surface: 'terminal',
+      component: 'ToolResult',
+      props: { tool_use_id: 't1', tool: 'Read', output: {}, isErrored: false },
+    })
+    expect(await ui.find({ type: 'Text', text: '▏' })).toBe(undefined)
+  })
+
+  test('a tool result with content keeps its stripe', ENGINE, async ($, on) => {
+    on('ui.render', { component: 'ToolResult' }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>Read 3 lines</Text>
+    })
+    await theme($, 'dracula')
+    const ui = await $.ui.mount({
+      plugin: 'chat-bubbles',
+      surface: 'terminal',
+      component: 'ToolResult',
+      props: { tool_use_id: 't1', tool: 'Read', output: {}, isErrored: false },
+    })
+    expect(await ui.find({ type: 'Text', text: '▏' })).toBeTruthy()
+  })
+
+  test("the spinner shimmers from the main turn's start to its own end: not for a prompt that starts no turn, not stopped by a subagent", ENGINE, async ($, on) => {
+    const clock = mock.clock(on, { now: 0 })
+    // Stand in for the engine beneath the plugin.
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.start', ($, e) => ({ turnId: e.turnId }))
+    on('turn.complete', () => ({ text: '' }))
+    await theme($, 'dracula')
+    const ui = await $.ui.mount({
+      plugin: 'chat-bubbles',
+      surface: 'desktop',
+      component: 'Spinner',
+      props: { word: 'Working', message: null, suffix: '…', mode: 'thinking' },
+    })
+    const spark = async () => (await ui.find({ type: 'Text', text: /^[✦✧✶✷✸✹] $/ }))?.text
+    const done = (turnId: string, agentId?: string) =>
+      $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId, reason: 'answer', ...(agentId ? { agentId } : {}) } as never)
+
+    await $.prompt.submit({ text: '/config', origin: { kind: 'composer' }, wait: false })
+    await clock.advance(1000)
+    expect(await spark()).toBe('✦ ')
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await clock.advance(260)
+    expect(await spark()).toBe('✧ ')
+    await done('s1', 'subagent-1')
+    await clock.advance(260)
+    expect(await spark()).toBe('✶ ')
+    await done('t1')
+    await clock.advance(1000)
+    expect(await spark()).toBe('✶ ')
+  })
 })

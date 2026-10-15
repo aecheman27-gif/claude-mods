@@ -1,4 +1,4 @@
 {
-  "description": "shared-edit-guard: tool.call{Read|Edit|Write|NotebookEdit} (ledger + gate), tool.call{Bash|PowerShell} (own-change windows)",
+  "description": "shared-edit-guard: tool.call{Read|Edit|Write|NotebookEdit} (ledger + gate), tool.call{Bash|PowerShell} (gate on writing commands + own-change windows), tool.call (gate on MCP write tools)",
   "modules": ["./register.ts"]
 }

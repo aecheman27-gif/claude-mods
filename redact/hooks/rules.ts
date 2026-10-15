@@ -6,7 +6,8 @@ export type Rule = {
   kind: RuleKind
   pattern: RegExp
   group?: number
-  verify?: (value: string) => boolean
+  // also sees the text and the value's start, for the character that opens it
+  verify?: (value: string, text: string, at: number) => boolean
   // sees the text and the match start, for context a regex without lookbehind cannot check
   before?: (text: string, at: number) => boolean
   source: string
@@ -129,8 +130,8 @@ const NOT_SECRETS = new Set([
 function plausibleSecret(v: string): boolean {
   const lower = v.toLowerCase()
   if (NOT_SECRETS.has(lower)) return false
-  if (/^\$\{[^}]*\}$|^\$\(?[A-Za-z_]\w*\)?$|^%[A-Za-z_]\w*%$|^\{\{.*\}\}$|^<.*>$/.test(v)) return false
-  if (v.includes('${') || v.includes('{{')) return false
+  if (/^\$\{[^}]*\}$|^\$\(?[A-Za-z_]\w*\)?$|^\$env:[A-Za-z_]\w*$|^%[A-Za-z_]\w*%$|^\{\{.*\}\}$|^<.*>$/i.test(v)) return false
+  if (v.includes('${') || v.includes('{{') || v.includes('#{')) return false
   if (/^(?:\/|\.{1,2}\/|~\/|[A-Za-z]:\\|\.\w)/.test(v)) return false
   if (/^(?:https?|file):\/\//i.test(lower)) return false
   if (/^(?:process\.env|os\.environ|env\.|import\.meta\.env)/.test(v)) return false
@@ -143,14 +144,35 @@ function notFiller(v: string): boolean {
   return entropy(v) >= 2.5 && !/x{6,}|X{6,}|0{8,}|EXAMPLE/.test(v)
 }
 
-// template and build-time slots: {{secret}}, <token>, __API_KEY__, %s, and a bare `Name=` cut off before its value
+// template and build-time slots: {{secret}}, {Secret}, <token>, __API_KEY__, %s, and a bare `Name=` cut off before its value
 function placeholderShaped(v: string): boolean {
-  return /^(?:\{\{|<|__|%)|(?:\}\}|>|__)$|^[A-Za-z_]+=$/.test(v)
+  return /^(?:\{\{|<|__|%)|(?:\}\}|>|__)$|^[A-Za-z_]+=$|^\{[A-Za-z_][\w.:-]*\}$/.test(v)
 }
 
-function quotedSecret(v: string): boolean {
+// an environment variable's name (GITHUB_TOKEN, DB_PASSWORD) said where its value would go
+function envName(v: string): boolean {
+  return /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(v) && v.replace(/\D/g, '').length <= 2
+}
+
+// The opening of a token a vendor rule above knows in full, cut too short to be that token: a prefix quoted
+// in docs (`pypi-AgE...`, `ghp_`). A whole token is caught by its own rule; a long one that rule misses
+// still reaches the generic rules.
+function vendorPrefix(v: string): boolean {
+  return v.length < 24 && /^(?:A[KS]IA|gh[pousr]_|github_pat_|glpat-|xox[abprs]-|[sr]k_live_|AIza|GOCSPX-|sk-(?:ant|proj|svcacct|admin)-|npm_|pypi-|hf_)/.test(v)
+}
+
+function quotedSecret(v: string, text = '', at = 0): boolean {
+  if (envName(v) || vendorPrefix(v)) return false
+  // a Markdown code span marks code, so a backticked name (`useOAuthFlow`, `client.token`) is not a value
+  if (text.charAt(at - 1) === '`' && codeName(v)) return false
   // lowercase words joined by - _ . with no digit read as enum values ('same-origin', 'github_webhook')
   return plausibleSecret(v) && !placeholderShaped(v) && entropy(v) >= 2.0 && !/^[a-z]+(?:[-_.][a-z]*)+$/.test(v)
+}
+
+// a quoted value in a slot that also holds names: config keys, braces, command-line flags
+function namedSlotSecret(v: string): boolean {
+  // a key=value spec (docker's --secret id=npmrc,src=...) is not itself the value
+  return quotedSecret(v) && !codeName(v) && !/^[A-Za-z_][\w.-]*=[^=]/.test(v)
 }
 
 function codeIdentifier(v: string): boolean {
@@ -169,11 +191,15 @@ function codeExpression(v: string): boolean {
   return parts.length > 1 && parts.every((p) => /^[A-Za-z_$][\w$]*$/.test(p) && p.replace(/\D/g, '').length <= 2)
 }
 
+function codeName(v: string): boolean {
+  // a code identifier or member chain with no digit (getToken, process.env.KEY, my-secret-name) is not a value
+  if (!/\d/.test(v) && /^[A-Za-z_$][\w$]*(?:[.\-][A-Za-z_$][\w$]*)*$/.test(v)) return true
+  return codeExpression(v)
+}
+
 function bareSecret(v: string): boolean {
   if (!plausibleSecret(v) || placeholderShaped(v) || entropy(v) < 3.0) return false
-  // a code identifier or member chain with no digit (getToken, process.env.KEY, my-secret-name) is not a value
-  if (!/\d/.test(v) && /^[A-Za-z_$][\w$]*(?:[.\-][A-Za-z_$][\w$]*)*$/.test(v)) return false
-  return !codeExpression(v)
+  return !codeName(v) && !envName(v) && !vendorPrefix(v)
 }
 
 function keywordStart(text: string, at: number): boolean {
@@ -439,6 +465,68 @@ export const RULES: readonly Rule[] = [
     source: GITLEAKS,
   },
   {
+    id: 'generic-secret-escaped',
+    label: 'SECRET',
+    kind: 'secret',
+    // JSON inside a JSON string: a notebook's source lines, an MCP result, `\"password\": \"...\"`
+    pattern: /(?:api[_-]?key|secret(?:[_-]?key)?|token|password|passwd|pwd|auth|credential)s?(?:\\["'])?[ \t]{0,5}(?::=|=>|[=:])[ \t]{0,5}\\["']((?:[^\s"'`\\]|\\\\){8,256})\\["']/gi,
+    group: 1,
+    verify: quotedSecret,
+    before: keywordStart,
+    source: 'https://www.rfc-editor.org/rfc/rfc8259#section-7',
+  },
+  {
+    id: 'xml-config-secret',
+    label: 'SECRET',
+    kind: 'secret',
+    // .NET appSettings: <add key="DbPassword" value="..."/>, the key ending in a secret's name
+    pattern: /<add[ \t]+key[ \t]*=[ \t]*["'][^"'<>]{0,64}?(?:password|passwd|pwd|secret|token|api[_-]?key|credentials?)["'][ \t]+value[ \t]*=[ \t]*["']([^"'<>\s]{6,256})["']/gi,
+    group: 1,
+    verify: namedSlotSecret,
+    source: 'https://learn.microsoft.com/en-us/dotnet/framework/configure-apps/file-schema/appsettings/add-element-for-appsettings',
+  },
+  {
+    id: 'xml-element-secret',
+    label: 'SECRET',
+    kind: 'secret',
+    // <password>...</password>, <DbPassword>, <client_secret>: the element's name ends in a secret's name
+    pattern: /<((?:[\w.-]{1,32}:)?[\w.-]{0,32}?(?:password|passwd|pwd|secret|token|api[_-]?key|credentials?))>([^<>\s]{8,256})<\/\1>/gi,
+    group: 2,
+    verify: namedSlotSecret,
+    source: 'https://www.w3.org/TR/xml/#sec-starttags',
+  },
+  {
+    id: 'odbc-password',
+    label: 'SECRET',
+    kind: 'secret',
+    // an ODBC connection string quotes a value in braces, }} standing for one }: PWD={p;ss}
+    pattern: /(?:pwd|password|passwd)[ \t]{0,5}=[ \t]{0,5}\{((?:[^{}\s"'\[\]()]|\}\}){4,256})\}(?!\})/gi,
+    group: 1,
+    verify: namedSlotSecret,
+    before: keywordStart,
+    source: 'https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqldriverconnect-function',
+  },
+  {
+    id: 'flag-secret',
+    label: 'SECRET',
+    kind: 'secret',
+    // a value given after a space: --password value, PowerShell's -Password "value"
+    pattern: /(?:^|[\s"'`(])(?:--(?:password|passwd|pwd|secret|token|api[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token)|-(?:password|passwd|secret|token|api[_-]?key|clientsecret|accesstoken))[ \t]+(["']?)([^\s"'`;|&<>(){}\[\]]{6,256})\1(?![^\s;|&)])/gim,
+    group: 2,
+    verify: namedSlotSecret,
+    source: 'https://www.gnu.org/software/libc/manual/html_node/Argument-Syntax.html',
+  },
+  {
+    id: 'sqlcmd-password',
+    label: 'SECRET',
+    kind: 'secret',
+    // -P is the password only to sqlcmd, bcp and osql (mysql's -P is a port, grep's a regex), and only capital
+    pattern: /\b(?:[Ss][Qq][Ll][Cc][Mm][Dd]|[Bb][Cc][Pp]|[Oo][Ss][Qq][Ll])(?:\.[Ee][Xx][Ee])?[ \t][^\r\n|;&]{0,256}?[ \t]-P[ \t]*(["']?)([^\s"'`;|&<>(){}\[\]]{4,256})\1(?![^\s;|&)])/g,
+    group: 2,
+    verify: namedSlotSecret,
+    source: 'https://learn.microsoft.com/en-us/sql/tools/sqlcmd/sqlcmd-utility',
+  },
+  {
     id: 'email',
     label: 'EMAIL',
     kind: 'pii',
@@ -602,7 +690,7 @@ function firstWrappedRule(decoded: string, off: ReadonlySet<string> | undefined)
     re.lastIndex = 0
     for (let m = re.exec(decoded); m !== null; m = re.exec(decoded)) {
       const raw = m[g]
-      if (raw && (!rule.before || rule.before(decoded, m.index)) && (!rule.verify || rule.verify(raw))) {
+      if (raw && (!rule.before || rule.before(decoded, m.index)) && (!rule.verify || rule.verify(raw, decoded, m.index + m[0].lastIndexOf(raw)))) {
         re.lastIndex = 0
         return order
       }
@@ -650,7 +738,7 @@ export function scan(text: string, opts: { pii?: boolean; off?: ReadonlySet<stri
       const end = start + raw.length
       const value = text.slice(start, end)
       const inPlaceholder = spans.some(([s, e]) => start < e && end > s)
-      if (inPlaceholder || (rule.before && !rule.before(masked, m.index)) || (rule.verify && !rule.verify(value))) {
+      if (inPlaceholder || (rule.before && !rule.before(masked, m.index)) || (rule.verify && !rule.verify(value, masked, start))) {
         re.lastIndex = m.index + 1
         continue
       }

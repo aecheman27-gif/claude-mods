@@ -1,4 +1,4 @@
 {
-  "description": "redact: prompt.submit, session.append, tool.call{tool=Edit|Write|NotebookEdit}, prompt.section{name=env_info_simple}, session.start, command.run{command=redact}",
+  "description": "redact: prompt.submit, session.append, prompt.context, prompt.section{name=memory|env_info_simple}, tool.call{tool=Edit|Write|NotebookEdit} (restore into a file that holds the value), tool.call{tool=Bash|PowerShell|Monitor} (refuse placeholders), session.start, command.run{command=redact}",
   "modules": ["./register.ts"]
 }

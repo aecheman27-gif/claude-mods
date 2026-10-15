@@ -1,7 +1,7 @@
 {
   "name": "shared-edit-guard",
-  "version": "0.1.0",
-  "description": "Asks before Claude edits a file that another tool (Gemini, an editor, another agent) changed in the last few minutes.",
+  "version": "0.2.0",
+  "description": "Asks before Claude edits a file that another tool (Gemini, an editor, another agent) changed in the last few minutes, through Edit/Write, a shell command that writes, or an MCP write tool. A Cancel keeps asking until you say Edit anyway or the change ages out.",
   "author": {
     "name": "aecheman27-gif"
   },
