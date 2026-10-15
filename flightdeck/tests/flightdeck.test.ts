@@ -250,14 +250,20 @@ test('inline above the prompt, the pane is a summary of at most 8 rows', async (
   }
 })
 
-test("other mods' rows for the pane draw under the session log, in both layouts", async ($, on) => {
+// Inline the pane asks for 8 rows of summary: a row of another mod's drawn under
+// several agent cards fell outside it, so it leads there instead.
+test("other mods' rows for the pane: under the session log docked, leading the inline summary", async ($, on) => {
   engine(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `o${++n}` }))
   on('ui.render', { component: 'Pane', requestId: 'flightdeck' }, (h, e) => h.ui.resolve(e).Text({ children: 'DOCKED-ROW' }))
+  await $.turn.start({ text: 'go', turnId: 'O1' })
+  for (const d of ['one', 'two', 'three']) await $.agent.spawn(spawn('general-purpose', `task ${d}`))
   for (const placement of ['dock', 'inline'] as const) {
     const ui = await $.ui.mount({ ...pane(64), props: { ...pane(64).props, placement }, surface: 'terminal' })
     const root = (await ui.drawn()) as { children?: unknown[] }
-    const last = (root.children ?? []).filter(Boolean).pop() as { props?: { children?: unknown } }
-    expect(JSON.stringify(last)).toContain('DOCKED-ROW')
+    const rows = (root.children ?? []).filter(Boolean)
+    expect(JSON.stringify(placement === 'dock' ? rows.pop() : rows[0])).toContain('DOCKED-ROW')
     await ui.unmount()
   }
 })
@@ -308,18 +314,37 @@ const probe = {
 const band = { plugin: 'probe', component: 'AbovePrompt' as const, surface: 'terminal' as const, props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} } as never }
 
 // The engine's record of the pane, which `ui.open`, `ui.close` and `ui.panes` keep:
-// `isUp` it is open, `isPlaced` a surface draws it.
-function record(on: On, rec: { isUp: boolean; isPlaced: boolean }) {
-  on('ui.open', () => {
-    rec.isUp = true
+// `isUp` it is open, `isPlaced` a surface draws it, `front` the pane shown (the
+// last opened; closing it shows flightdeck's again), `rows` what its open asked.
+type Rec = { isUp: boolean; isPlaced: boolean; front?: string; rows?: number }
+function record(on: On, rec: Rec) {
+  on('ui.open', (_$, e) => {
+    if (e.id === 'flightdeck') {
+      rec.isUp = true
+      rec.rows = e.rows
+    }
+    rec.front = e.id
     return { value: rec.isPlaced ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' } } as never
   })
-  on('ui.close', () => {
-    rec.isUp = false
+  on('ui.close', (_$, e) => {
+    if (e.id === 'flightdeck') rec.isUp = false
+    if (rec.front === e.id) rec.front = undefined
     return { value: undefined } as never
   })
-  on('ui.panes', () => ({ value: rec.isUp ? [{ id: 'flightdeck', title: 'Flightdeck', isShown: true, isFocused: false, isPlaced: rec.isPlaced }] : [] }) as never)
+  on('ui.panes', () => ({ value: rec.isUp ? [{ id: 'flightdeck', title: 'Flightdeck', isShown: (rec.front ?? 'flightdeck') === 'flightdeck', isFocused: false, isPlaced: rec.isPlaced }] : [] }) as never)
   return rec
+}
+
+// Another mod with a pane of its own (/ctx, /changes, /qa ...).
+const shelf = {
+  name: 'shelf',
+  register: ((on: On) => {
+    on('command.run', { command: 'shelf' }, async ($, e) => {
+      if (e.args === 'close') await $.ui.close({ id: 'shelf' })
+      else await $.ui.open({ id: 'shelf', title: 'Shelf' })
+      return { text: 'ok' }
+    })
+  }) as never,
 }
 const measure = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
   $.session.measure({ context: { window: 200_000, percent: 10, tokens: 20_000 }, rateLimits: [], changed: [] } as never)
@@ -346,6 +371,24 @@ test('a pane that waits undrawn is not a dock, until it is placed', { plugins: [
   rec.isPlaced = true // the terminal widened: no open of ours, no event of its own
   await measure($)
   expect(await ui.find({ text: 'dock=true' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('another pane shown in front is not a dock; closing it docks again', { plugins: [probe, shelf] }, async ($, on) => {
+  engine(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
+  const rec = record(on, { isUp: false, isPlaced: true })
+  const ui = await $.ui.mount(band)
+  await $.command.run({ command: 'flightdeck', args: '' } as never)
+  expect(await ui.find({ text: 'dock=true' })).toBeDefined()
+  expect(rec.rows).toBeGreaterThanOrEqual(13) // the 8-row summary and another mod's block above it
+  await $.command.run({ command: 'shelf', args: '' } as never)
+  expect(await ui.find({ text: 'dock=false' })).toBeDefined()
+  await $.command.run({ command: 'shelf', args: 'close' } as never)
+  expect(await ui.find({ text: 'dock=true' })).toBeDefined()
+  rec.front = 'shelf' // the person switched tabs: no event of its own; the next measurement sees it
+  await measure($)
+  expect(await ui.find({ text: 'dock=false' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -450,6 +493,51 @@ test('the gate strip fills from checks and a row opens its redacted drill-down',
   expect(await ui.find({ text: /Authorization: Bearer •••/ })).toBeDefined()
   expect(await ui.find({ text: /abcdefgh12345/ })).toBeUndefined()
   await ui.unmount()
+})
+
+// Core answers a refusal at the permission dialog as an errored result, never `{ deny }`.
+test('an ask refused at the dialog counts as denied; one that ran cleanly as cleared', async ($, on) => {
+  engine(on)
+  const refused = "The user doesn't want to proceed with this tool use."
+  on('tool.check', () => ({ decision: 'ask' }))
+  on('tool.call', (_$, e) => (String((e as { command?: string }).command).startsWith('rm') ? { isError: true, result: refused, text: refused } : { result: { stdout: '' }, text: '' }) as never)
+  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'q1' })
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf build', tool_use_id: 'q1' } as never)
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' }, tool_use_id: 'q2' })
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'q2' } as never)
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /✗ 1 denied/ })).toBeDefined()
+  expect(await ui.find({ text: / 1 you/ })).toBeDefined()
+  expect(await ui.find({ text: /pending/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+// Where an organization manages Claude Code, session.compact passes over installed plugins
+// (so does the compaction's boundary row): the fill falling to under half counts it there.
+test('a compaction counts once: from session.compact where it runs, else from the fill falling', async ($, on) => {
+  engine(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
+  const summary = [{ role: 'user', text: 'summary of the conversation so far', toolUses: [] }]
+  on('session.compact', () => ({ messages: summary }) as never)
+  const fill = (tokens: number) => $.session.measure({ context: { window: 200_000, percent: tokens / 2000, tokens }, rateLimits: [], changed: ['context'] } as never)
+  const drawn = async () => {
+    const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+    const text = JSON.stringify(await ui.drawn())
+    await ui.unmount()
+    return text
+  }
+  const count = async () => Number(/⟲(\d+)/.exec(await drawn())?.[1] ?? 0)
+  await fill(150_000)
+  await fill(40_000) // no session.compact heard: managed
+  expect(await count()).toBe(1)
+  expect(await drawn()).toContain('context compacted (150k → 40k)')
+  await fill(120_000)
+  await $.session.compact({ trigger: 'auto', messages: summary } as never)
+  await fill(30_000) // the drop of the compaction the hook already counted
+  expect(await count()).toBe(2)
+  await fill(36_000)
+  await fill(25_000) // a smaller fall is no compaction
+  expect(await count()).toBe(2)
 })
 
 test('config changes labels, hides panels and turns the moments off', { options: { architectLabel: 'REVIEWER', panels: 'main,architect,agents,log', moments: false } }, async ($, on) => {

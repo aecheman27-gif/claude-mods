@@ -21,6 +21,11 @@ const TRANSCRIPT = [
     ],
   },
 ]
+// what the transcript reads as after a compaction
+const COMPACTED = [
+  { role: 'user', text: 'summary of the conversation so far', toolUses: [] },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'e', tool: 'Read', input: { file_path: 'x/after.ts' }, text: 'q'.repeat(4000) }] },
+]
 
 function world(on: On, opts: Opts = {}) {
   mock.clock(on, { now: 0 })
@@ -31,6 +36,7 @@ function world(on: On, opts: Opts = {}) {
     stored: {} as Record<string, unknown>,
     opened: [] as string[],
     messageReads: 0,
+    messages: opts.messages ?? TRANSCRIPT,
     model: opts.model ?? 'claude-opus-5-5',
   }
   const files: Record<string, string> = opts.files ?? { 'C:/work/app/.git/HEAD': 'ref: refs/heads/feature/x\n' }
@@ -84,7 +90,7 @@ function world(on: On, opts: Opts = {}) {
   })
   on('session.messages', async () => {
     w.messageReads++
-    return { value: opts.messages ?? TRANSCRIPT } as never
+    return { value: w.messages } as never
   })
   on('session.compact', async () => ({ messages: opts.compacted ?? [] }) as never)
   on('ui.panes', async () => ({ value: opts.isPaneOpen ? [{ id: 'ctx', title: 'Context', isPlaced: true }] : [] }) as never)
@@ -216,21 +222,57 @@ describe("flightdeck's pane", () => {
   })
 })
 
+// Stands in for hw-write-guard: /hw-guard <mode> publishes its mode in $.state.
+// (A stand-in's register runs in an environment of its own: no closure over test values.)
+const hwGuard = {
+  name: 'hw-write-guard',
+  register: ((on: On) => {
+    on('command.run', { command: 'hw-guard' }, async ($, e) => {
+      await $.state.set({ plugin: 'hw-write-guard', key: 'mode' } as never, e.args as never)
+      return { text: `mode ${e.args}` }
+    })
+  }) as never,
+}
+const guardLabel = async (ui: { find: (q: object) => Promise<{ text: string; props: { color?: unknown } } | undefined> }) => {
+  const found = await ui.find({ type: 'Text', text: /^\[HW-GUARD / })
+  return found ? `${found.text} ${String(found.props.color)}` : ''
+}
+
 describe('[SYS]', () => {
-  test('shows repo, branch, model and guard ON', async ($, on) => {
+  test('shows repo, branch, model and the guard', async ($, on) => {
     world(on)
     await start($)
     const text = await textOf(await mountBand($))
     expect(text).toContain('repo:app')
     expect(text).toContain('feature/x')
     expect(text).toContain('opus-5.5')
-    expect(text).toContain('[HW-GUARD ON]')
+    expect(text).toContain('[HW-GUARD ?]') // /hw-guard is there; no mode published
   })
 
   test('guard OFF when hw-guard is not registered', async ($, on) => {
     world(on, { commands: ['other'] })
     await start($)
-    expect(await textOf(await mountBand($))).toContain('[HW-GUARD OFF]')
+    expect(await guardLabel(await mountBand($))).toBe('[HW-GUARD OFF] #FFB000')
+  })
+
+  test("the guard's mode as it publishes it: ASK green, NOTIFY amber, OFF red, redrawn as it changes", { plugins: [hwGuard] }, async ($, on) => {
+    world(on)
+    await start($)
+    const ui = await mountBand($)
+    expect(await guardLabel(ui)).toBe('[HW-GUARD ?] gray') // loaded, no mode published yet
+    await $.command.run({ command: 'hw-guard', args: 'ask' } as never)
+    expect(await guardLabel(ui)).toBe('[HW-GUARD ASK] green')
+    await $.command.run({ command: 'hw-guard', args: 'notify' } as never)
+    expect(await guardLabel(ui)).toBe('[HW-GUARD NOTIFY] #FFB000')
+    await $.command.run({ command: 'hw-guard', args: 'off' } as never)
+    expect(await guardLabel(ui)).toBe('[HW-GUARD OFF] #f87171')
+  })
+
+  test('a value that is none of its modes reads as none published: [HW-GUARD ?]', { plugins: [hwGuard] }, async ($, on) => {
+    world(on)
+    await start($)
+    await $.command.run({ command: 'hw-guard', args: 'loud' } as never)
+    expect(await guardLabel(await mountBand($))).toBe('[HW-GUARD ?] gray')
   })
 
   test('worktree .git file is followed', async ($, on) => {
@@ -367,12 +409,7 @@ describe('[CTX]', () => {
   })
 
   test('a compaction rebuilds the outputs from what the transcript reads as afterwards', async ($, on) => {
-    world(on, {
-      compacted: [
-        { role: 'user', text: 'summary of the conversation so far', toolUses: [] },
-        { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'e', tool: 'Read', input: { file_path: 'x/after.ts' }, text: 'q'.repeat(4000) }] },
-      ],
-    })
+    world(on, { compacted: COMPACTED })
     await start($)
     await measure($)
     expect(await textOf(await mountBand($))).toContain('tool output: Bash 10k · Read 2.0k')
@@ -380,6 +417,34 @@ describe('[CTX]', () => {
     const text = await textOf(await mountBand($))
     expect(text).toContain('tool output: Read 1.0k')
     expect(text).not.toContain('Bash 10k')
+  })
+
+  // Where an organization manages Claude Code, session.compact passes over installed plugins.
+  const fellTo = ($: Engine, tokens: number) => $.session.measure({ context: { window: 200_000, tokens, percent: tokens / 2000 }, rateLimits: [], changed: ['context'] } as never)
+
+  test('where session.compact never reaches it, the fill falling to under half rebuilds the outputs', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await measure($)
+    expect(await textOf(await mountBand($))).toContain('tool output: Bash 10k · Read 2.0k')
+    w.messages = COMPACTED
+    await fellTo($, 100_000) // 124k to 100k: no compaction
+    expect(await textOf(await mountBand($))).toContain('Bash 10k')
+    await fellTo($, 30_000)
+    const text = await textOf(await mountBand($))
+    expect(text).toContain('tool output: Read 1.0k')
+    expect(text).not.toContain('Bash 10k')
+  })
+
+  test('where it does reach it, the drop that follows is not walked again', async ($, on) => {
+    const w = world(on, { compacted: COMPACTED })
+    await start($)
+    await measure($)
+    await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT } as never)
+    const reads = w.messageReads
+    await fellTo($, 30_000)
+    expect(w.messageReads).toBe(reads)
+    expect(await textOf(await mountBand($))).toContain('tool output: Read 1.0k')
   })
 
   test('a long command is kept as a capped label', async ($, on) => {

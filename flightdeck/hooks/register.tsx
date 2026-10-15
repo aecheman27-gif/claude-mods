@@ -29,6 +29,7 @@ import {
   gateSummary,
   gauge,
   isAdvising,
+  isCompactionDrop,
   isLoopActive,
   kTokens,
   lanes,
@@ -202,15 +203,17 @@ function withoutEngine(node: unknown): unknown {
 /**
  * `dock` from the engine's record of the pane, not from our own opens and
  * closes: a reload, or a pane placed once the terminal widens, raises neither.
+ * Drawn means placed and in front: behind another pane's tab nothing draws it.
  */
 async function syncDock($: EngineInterface) {
-  const isUp = (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
+  const isUp = (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced && p.isShown)
   if ((await read($, dock)) !== isUp) await update($, dock, () => isUp)
 }
 
 async function openPane($: EngineInterface) {
-  // columns apply when docked beside the transcript, rows when seated inline above the prompt.
-  const opened = await $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS, rows: 8 })
+  // columns apply when docked beside the transcript, rows when seated inline above the prompt:
+  // the summary's 8 and room for another mod's block above it (inline the frame fits the tree).
+  const opened = await $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS, rows: 13 })
   await syncDock($)
   return opened
 }
@@ -235,6 +238,16 @@ async function costNow($: EngineInterface): Promise<number | null> {
   return u?.cost?.usd ?? null
 }
 
+/** One compaction of the main conversation: counted, and a line in the log. */
+async function countCompaction($: EngineInterface, text: string) {
+  const now = await $.clock.now()
+  await update($, usage, x => {
+    const u = normalize(DEFAULT_USAGE, x)
+    return { ...u, compactions: u.compactions + 1, lastCompactAt: now }
+  })
+  await say($, 'main', text)
+}
+
 async function noteMode($: EngineInterface, mode: string | undefined) {
   if (mode) await update($, main, m => (normalize(DEFAULT_MAIN, m).mode === mode ? normalize(DEFAULT_MAIN, m) : { ...normalize(DEFAULT_MAIN, m), mode }))
 }
@@ -246,6 +259,8 @@ export const register: Register = (on, options) => {
   const C = PALETTES[cfg.palette]
   // tool.check carries no loop id; the tool.call around it does, keyed by the call's id.
   const callLoop = new Map<string, string | null>()
+  // session.compact counted the compaction whose drop the next context reading shows.
+  let isCompactHeard = false
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -280,12 +295,21 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Closed (/flightdeck close, the close mark, ctrl+x x): other mods' rows go back to the band.
+  // Closed (/flightdeck close, the close mark, ctrl+x x), or put behind or back in
+  // front by another pane opening or closing (/ctx, /changes ...): other mods' rows
+  // follow it between the band and the pane. A tab the person picks raises no event;
+  // the next measurement catches that.
+  on('ui.open', async ($, e, next) => {
+    const opened = await next(e)
+    await syncDock($).catch(() => undefined)
+    return opened
+  }).catch(($, e, next) => next(e))
+
   on('ui.close', async ($, e, next) => {
     const done = await next(e)
-    if (e.id === PANE) await syncDock($).catch(() => undefined)
+    await syncDock($).catch(() => undefined)
     return done
-  })
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'flightdeck' }, async ($, e) => {
     const [verb = 'open', arg = ''] = e.args.trim().split(/\s+/)
@@ -368,15 +392,23 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
+    const before = (await getUsage($)).tokens
+    const after = e.context.tokens ?? null
     await update($, usage, x => ({
       ...normalize(DEFAULT_USAGE, x),
       pct: e.context.percent ?? null,
-      tokens: e.context.tokens ?? null,
+      tokens: after,
       window: e.context.window,
       costUsd: e.cost?.usd ?? null,
       limits: e.rateLimits.map(r => ({ kind: r.kind, pct: r.percentUsed })),
     }))
-    if (e.changed.includes('context')) await refreshStatus($, cfg)
+    if (e.changed.includes('context')) {
+      // Where an organization manages Claude Code, session.compact passes over the plugins a
+      // person installs: a compaction shows here instead, as the fill falling to under half.
+      if (!isCompactHeard && isCompactionDrop(before, after)) await countCompaction($, `context compacted (${kTokens(before ?? 0)} → ${kTokens(after ?? 0)})`)
+      isCompactHeard = false
+      await refreshStatus($, cfg)
+    }
     await syncDock($).catch(() => undefined)
     return next(e)
   })
@@ -384,15 +416,11 @@ export const register: Register = (on, options) => {
   on('session.compact', async ($, e, next) => {
     const done = await next(e)
     if (!e.agentId && e.trigger !== 'precompute') {
-      const now = await $.clock.now()
-      await update($, usage, x => {
-        const u = normalize(DEFAULT_USAGE, x)
-        return { ...u, compactions: u.compactions + 1, lastCompactAt: now }
-      })
-      await say($, 'main', `context compacted (${e.trigger})`)
+      isCompactHeard = true
+      await countCompaction($, `context compacted (${e.trigger})`)
     }
     return done
-  })
+  }).catch(($, e, next) => next(e))
 
   on('tool.check', async ($, e, next) => {
     const verdict = await next(e)
@@ -420,10 +448,13 @@ export const register: Register = (on, options) => {
     callLoop.set(e.tool_use_id, e.agentId ?? null)
     const ran = await next(e).finally(() => callLoop.delete(e.tool_use_id))
     const didRun = ran.deny === undefined
+    // Core answers a refusal at the permission dialog as an errored result, never `{ deny }`:
+    // an ask cleared only when its call came back without an error.
+    const isCleared = didRun && ran.isError !== true
     // Settle this call's pending ask, if it had one; skip the write (and the redraw) otherwise.
     const g0 = await getGate($)
-    const isSettled = settleCheck(g0, e.tool_use_id, didRun) !== g0
-    if (isSettled) await update($, gate, g => settleCheck(normalizeGate(g), e.tool_use_id, didRun))
+    const isSettled = settleCheck(g0, e.tool_use_id, isCleared) !== g0
+    if (isSettled) await update($, gate, g => settleCheck(normalizeGate(g), e.tool_use_id, isCleared))
     // A background agent hands its report back through this tool; an architect's report is its advice.
     if (String(e.tool) === 'SubagentHandback') {
       const message = (e as unknown as { message?: unknown }).message
@@ -459,7 +490,7 @@ export const register: Register = (on, options) => {
     else if (isEdit) await say($, await whoIs($, e.agentId), text, 'info', e.agentId ?? null)
     if (isSettled || !didRun) await refreshStatus($, cfg)
     return ran
-  })
+  }).catch(($, e, next) => next(e))
 
   // A server-side review tool never reaches tool.call: it shows only in the assistant's rows.
   on('session.append', async ($, e, next) => {
@@ -1041,6 +1072,8 @@ export const register: Register = (on, options) => {
         : null
 
     // Inline above the prompt (the terminal's main screen), the pane is a summary of at most 8 rows.
+    // Other mods' rows lead it: under several agent cards they fell outside the rows the pane got,
+    // and while it is drawn they are nowhere else (mission-control's block leaves the band).
     const isMini = layout === 'mini' || (layout === 'auto' && e.props.placement === 'inline')
     if (isMini) {
       const live = [...cards.filter(c => c.status === 'running'), ...cards.filter(c => c.status !== 'running').reverse()].slice(0, 3)
@@ -1049,6 +1082,7 @@ export const register: Register = (on, options) => {
       const mg = u.pct !== null ? gauge(u.pct, 6) : null
       return (
         <Box flexDirection="column" width={W}>
+          {slot}
           <Text wrap="truncate">
             <Text color={C.main} bold>
               {modelName}
@@ -1094,7 +1128,6 @@ export const register: Register = (on, options) => {
               {`last turn ${fmtDuration(r.durationMs)} · ${plural(r.agents, 'agent')} · ${plural(r.edits, 'edit')} · ${plural(r.errors, 'error')}${r.costDelta !== null ? ` · +${fmtUsd(r.costDelta)}` : ''}`}
             </Text>
           ) : null}
-          {slot}
         </Box>
       )
     }

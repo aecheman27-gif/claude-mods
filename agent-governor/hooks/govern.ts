@@ -37,13 +37,27 @@ export function parseCount(text: string): number | null {
   return n > 0 && Number.isFinite(n) ? n : null
 }
 
+const ALIASES = ['sonnet', 'opus', 'haiku', 'fable']
+
+/**
+ * A route's model, lowercased: an alias the Agent tool takes or a full `claude-` id; null for
+ * anything else, so a typo (`sonet`) never reaches the store and breaks every spawn of the type.
+ */
+export function modelOf(text: string): string | null {
+  const m = text.trim().toLowerCase()
+  return ALIASES.includes(m) || /^claude-[a-z0-9.-]+(\[1m\])?$/.test(m) ? m : null
+}
+
 /** Settings as stored, each field checked, the defaults where one is missing or bad. */
 export function settingsFrom(stored: unknown): Settings {
   const s = (stored && typeof stored === 'object' ? stored : {}) as Partial<Record<keyof Settings, unknown>>
   const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : d)
   const routes: Record<string, string> = {}
   if (s.routes && typeof s.routes === 'object') {
-    for (const [type, model] of Object.entries(s.routes as Record<string, unknown>)) if (typeof model === 'string' && model) routes[type] = model
+    for (const [type, model] of Object.entries(s.routes as Record<string, unknown>)) {
+      const valid = typeof model === 'string' ? modelOf(model) : null
+      if (valid) routes[type] = valid
+    }
   }
   return {
     maxConcurrent: num(s.maxConcurrent, DEFAULTS.maxConcurrent),
@@ -207,9 +221,13 @@ export function parseCommand(args: string): Command {
   }
   if (verb === 'route') {
     if (/^off$/i.test(arg)) return { kind: 'routes-off' }
+    const usage = '/governor route takes <type>=<model> (e.g. Explore=sonnet), <type>=off, or off; the model is sonnet, opus, haiku, fable or a full claude- id.'
     const m = /^([^=\s]+)=(\S*)$/.exec(arg)
-    if (!m) return { kind: 'error', text: '/governor route takes <type>=<model> (e.g. Explore=sonnet), <type>=off, or off.' }
-    return { kind: 'route', type: m[1], model: m[2] && m[2].toLowerCase() !== 'off' ? m[2] : null }
+    if (!m) return { kind: 'error', text: usage }
+    const [, type = '', given = ''] = m
+    if (!given || given.toLowerCase() === 'off') return { kind: 'route', type, model: null }
+    const model = modelOf(given)
+    return model ? { kind: 'route', type, model } : { kind: 'error', text: `"${given}" is not a model. ${usage}` }
   }
   return { kind: 'error', text: `Unknown /governor command "${word}". Try: /governor, max N, budget N, session N, caps on|off, route <type>=<model>|off.` }
 }

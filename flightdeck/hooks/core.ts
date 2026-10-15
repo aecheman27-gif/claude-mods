@@ -209,6 +209,13 @@ export const shorten = (s: string, n: number) => {
 export const kTokens = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 
+/**
+ * Two context readings in a row where the fill fell to under half of at least 20k tokens: a
+ * compaction (a rewind looks the same). Nothing else empties the window; /clear starts a new one.
+ */
+export const isCompactionDrop = (before: number | null, after: number | null): boolean =>
+  before !== null && after !== null && before >= 20_000 && after < before / 2
+
 export const fmtDuration = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
   if (s < 60) return `${s}s`
@@ -302,11 +309,11 @@ export const recordCheck = (g: Gate, c: Check): Gate => {
   }
 }
 
-/** An `ask` settled by the call that followed it: it ran (cleared) or was refused (deny). */
-export const settleCheck = (g: Gate, id: string, didRun: boolean): Gate => {
+/** An `ask` settled by the call that followed it: it ran without error (cleared) or was refused or failed (deny). */
+export const settleCheck = (g: Gate, id: string, isCleared: boolean): Gate => {
   const c = g.recent.find(r => r.id === id && r.verdict === 'ask')
   if (!c) return g
-  const verdict = didRun ? 'cleared' : 'deny'
+  const verdict = isCleared ? 'cleared' : 'deny'
   const t = g.totals[c.bucket]
   return {
     recent: g.recent.map(r => (r === c ? { ...r, verdict } : r)),

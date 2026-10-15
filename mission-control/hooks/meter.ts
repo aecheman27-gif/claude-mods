@@ -18,6 +18,13 @@ export function bar(fraction: number, width: number): string {
   return '█'.repeat(filled) + '░'.repeat(w - filled)
 }
 
+/**
+ * Two context readings in a row where the fill fell to under half of at least 20k tokens: a
+ * compaction (a rewind looks the same). Nothing else empties the window; /clear starts a new one.
+ */
+export const isCompactionDrop = (before: number | undefined, after: number | undefined): boolean =>
+  before !== undefined && after !== undefined && before >= 20_000 && after < before / 2
+
 /** Green under 60%, yellow under 80%, red from there. */
 export const tone = (percent: number): string => (percent >= 80 ? '#f87171' : percent >= 60 ? '#facc15' : '#4ade80')
 

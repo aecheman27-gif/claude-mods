@@ -217,6 +217,30 @@ describe('caps (opt-in)', () => {
     expect(w.spawns.length).toBe(6)
   })
 
+  test('spawns made at once count each other: only the first under the limit starts unasked', async ($, on) => {
+    const w = world(on, { answer: 'Deny' })
+    await start($)
+    await gov($, 'caps on')
+    await spawnN($, 5)
+    const results = await Promise.all([spawn($), spawn($), spawn($), spawn($)])
+    expect(w.spawns.length).toBe(6)
+    expect(w.asked.length).toBe(3)
+    expect(results.filter(r => JSON.stringify(r).includes('already running')).length).toBe(3)
+    expect(await bandText($)).toContain('agents 6 running')
+  })
+
+  test('an agent over budget may still hand back, message and stop', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await gov($, 'caps on')
+    await spawn($)
+    await step($, w, 'a1', 320_000)
+    for (const tool of ['SubagentHandback', 'SendMessage', 'TaskStop']) await $.tool.call({ tool, message: 'report', agentId: 'a1' } as never)
+    expect(w.ran.map(r => r.tool)).toEqual(['SubagentHandback', 'SendMessage', 'TaskStop'])
+    expect(JSON.stringify(await call($, 'a1'))).toContain('used its token budget')
+    expect(w.ran.length).toBe(3)
+  })
+
   test('an agent over budget has its tool calls denied; others and the main loop run', async ($, on) => {
     const w = world(on)
     await start($)
@@ -250,6 +274,33 @@ describe('routing (opt-in)', () => {
       { type: 'Explore', model: 'opus' },
       { type: 'Plan', model: undefined },
       { type: 'Explore', model: undefined },
+    ])
+  })
+
+  test('a model that is not an alias or a claude- id is refused and not kept', async ($, on) => {
+    const w = world(on)
+    await start($)
+    const typo = (await gov($, 'route Explore=sonet')).text ?? ''
+    expect(typo).toContain('"sonet" is not a model')
+    expect(typo).toContain('sonnet, opus, haiku, fable')
+    expect(w.stored.settings).toBeUndefined()
+    expect((await gov($, 'route Explore=Sonnet')).text).toContain('Explore=sonnet')
+    expect((await gov($, 'route Plan=claude-opus-4-8[1m]')).text).toContain('Plan=claude-opus-4-8[1m]')
+    expect((await gov($, 'route Plan=gpt-5')).text).toContain('is not a model')
+    expect((w.stored.settings as { routes: unknown }).routes).toEqual({ Explore: 'sonnet', Plan: 'claude-opus-4-8[1m]' })
+    await spawn($, 'Explore')
+    expect(w.spawns).toEqual([{ type: 'Explore', model: 'sonnet' }])
+  })
+
+  test('a bad model stored by an older version is dropped at load', async ($, on) => {
+    const w = world(on, { stored: { settings: { routes: { Explore: 'sonet', Plan: 'OPUS' } } } })
+    await start($)
+    expect((await gov($)).text).toContain('Routes: Plan=opus')
+    await spawn($, 'Explore')
+    await spawn($, 'Plan')
+    expect(w.spawns).toEqual([
+      { type: 'Explore', model: undefined },
+      { type: 'Plan', model: 'opus' },
     ])
   })
 })
@@ -330,7 +381,9 @@ describe('helpers', () => {
     expect(parseCommand('route Explore=off')).toEqual({ kind: 'route', type: 'Explore', model: null })
     expect(parseCommand('route off')).toEqual({ kind: 'routes-off' })
     expect(parseCommand('caps maybe').kind).toBe('error')
-    expect(settingsFrom({ maxConcurrent: -1, caps: 'yes', routes: { A: 'x', B: 3 } })).toEqual({ ...DEFAULTS, routes: { A: 'x' } })
+    expect(parseCommand('route Explore=HAIKU')).toEqual({ kind: 'route', type: 'Explore', model: 'haiku' })
+    expect(parseCommand('route Explore=sonet').kind).toBe('error')
+    expect(settingsFrom({ maxConcurrent: -1, caps: 'yes', routes: { A: 'x', B: 3, C: 'Sonnet' } })).toEqual({ ...DEFAULTS, routes: { C: 'sonnet' } })
   })
 
   test('finished agents older than an hour are dropped, totals kept', async () => {

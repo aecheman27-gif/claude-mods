@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Mission-control skin: [SYS]/[TOOL]/[EDIT] tool rows with per-tool icons and one status block above the prompt (under flightdeck's session log while its pane is open): [SYS] repo, branch, model, hw-guard; [CTL] model and effort buttons; [CTX] context fill with a /ctx pane by tool. /clean for a checklist view.",
   "author": {
     "name": "aecheman27-gif"

@@ -6,12 +6,16 @@ import type { Streak } from '../types'
 // Warns when the main loop or a subagent keeps retrying the same failing call
 // (a busy COM port, a Modbus timeout, a flaky test): after N identical
 // failures in a row from one loop, one toast and a row above the prompt.
-// Observe only: every result passes through unchanged, nothing is denied.
+// "In a row" looks past what a retry loop does between attempts (a sleep, a
+// check): the streak ends when that same call succeeds, or after OK_RESET
+// successful calls of anything else in a row; a different call failing starts
+// a new one. Observe only: every result passes through unchanged, nothing is denied.
 // $.state, $.store, $.clock and $.agent.list only: no network, processes or model calls.
 
 const streaks = atom({ plugin: 'retry-breaker', key: 'streaks' } as const, {})
 
 const DEFAULT_THRESHOLD = 3
+const OK_RESET = 5
 const MAX_LOOPS = 50
 const IDLE_MS = 30 * 60_000
 const MAX_ROWS = 3
@@ -90,6 +94,16 @@ export function counted(
   return { all: Object.fromEntries(kept), isCrossed }
 }
 
+/** One success counted: the same call ends its loop's streak, as do OK_RESET successes of other calls in a row. */
+export function succeeded(all: Record<string, Streak>, loop: string, key: string): Record<string, Streak> {
+  const s = all[loop]
+  if (!s) return all
+  const okSince = (s.okSince ?? 0) + 1
+  if (s.key !== key && okSince < OK_RESET) return { ...all, [loop]: { ...s, okSince } }
+  const { [loop]: _gone, ...rest } = all
+  return rest
+}
+
 async function labelOf($: EngineInterface, agentId: string | undefined): Promise<string> {
   if (!agentId) return 'Claude'
   try {
@@ -127,10 +141,8 @@ export const register: Register = on => {
     const error = failureOf(ran)
     if (error === undefined) {
       if ((await read($, streaks))[loop]) {
-        await update($, streaks, all => {
-          const { [loop]: _gone, ...rest } = all
-          return rest
-        })
+        const key = callOf(e as Record<string, unknown>).key
+        await update($, streaks, all => succeeded(all, loop, key))
       }
       return ran
     }

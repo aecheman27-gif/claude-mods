@@ -11,6 +11,8 @@ export type Streak = {
   lastError: string
   /** clock time of the last failure */
   lastAt: number
+  /** successful calls of other commands since the last failure; OK_RESET of them end the streak */
+  okSince?: number
   /** who: 'Claude' for the main loop, the agent's description/type, or 'agent <id>' */
   label?: string
   /** reached the threshold: toasted once and drawn in the band */

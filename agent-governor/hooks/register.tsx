@@ -30,6 +30,14 @@ let isLoaded = false
 let isCapsOn = false
 let isLive = false
 let isQueued = false
+// Spawns past the check whose agent is not recorded yet (recording waits for
+// `next`): spawns made at once each read the state before any records its
+// agent, so these count toward the limit too.
+let inFlight = 0
+
+// An agent over its budget may still wind down: hand its report back, message,
+// stop a task. Denying these loses the report and costs a request per retry.
+const WIND_DOWN = new Set(['SubagentHandback', 'SendMessage', 'TaskStop'])
 
 const tooMany = (n: number, max: number) =>
   `agent-governor: ${n} subagents are already running (limit ${max}). Wait for the running agents to finish and hand back their results, then start this one if it is still needed.`
@@ -136,18 +144,23 @@ export const register: Register = on => {
     const route = s.routes[e.subagentType]
     const input = route && !e.model && !e.fork && !e.workflow ? { ...e, model: route } : e
     if (s.caps) {
-      const n = running(g).length
+      const n = running(g).length + inFlight
       if (n >= s.maxConcurrent) {
         const answer = await $.ui.ask(`${n} agents already running. Start another?`, { options: ['Start it', 'Deny'], header: 'Governor' }).catch(() => 'Deny')
         if (answer !== 'Start it') return { deny: tooMany(n, s.maxConcurrent) }
       }
     }
-    const started = await next(input)
-    if (started.agentId) {
-      const id = started.agentId
-      await change($, (g, now) => spawned(g, { id, type: e.subagentType || 'agent', description: e.description }, now)).catch(() => undefined)
+    inFlight++
+    try {
+      const started = await next(input)
+      if (started.agentId) {
+        const id = started.agentId
+        await change($, (g, now) => spawned(g, { id, type: e.subagentType || 'agent', description: e.description }, now)).catch(() => undefined)
+      }
+      return started
+    } finally {
+      inFlight--
     }
-    return started
   }).catch(($, e, next) => (next.called ? next(e) : isCapsOn ? { deny: 'agent-governor: its check failed while caps are on; try the spawn again.' } : next(e)))
 
   on('turn.step', async function* ($, e, next) {
@@ -170,7 +183,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId && (isCapsOn || !isLoaded)) {
+    if (e.agentId && (isCapsOn || !isLoaded) && !WIND_DOWN.has(String(e.tool))) {
       const g = await ensure($)
       const a = g.agents[e.agentId]
       if (g.settings.caps && a && a.tokens > g.settings.agentBudget) return { deny: OVER_BUDGET }

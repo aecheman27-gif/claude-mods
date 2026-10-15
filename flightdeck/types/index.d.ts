@@ -2,7 +2,11 @@ export type Moment = 'before a plan' | 'error repeats' | 'before done'
 
 export type Bucket = 'file' | 'shell' | 'other'
 
-/** rule: settings allowed it. ask: put to the decider, outcome pending. cleared: asked, then ran. deny: refused. */
+/**
+ * rule: settings allowed it. ask: put to the decider, outcome pending. cleared: asked, then ran
+ * without error. deny: refused (an ask whose call came back errored too: core reports a refusal
+ * at the dialog as an errored result, which a failed run cannot be told apart from).
+ */
 export type Verdict = 'rule' | 'ask' | 'cleared' | 'deny'
 
 export type Main = { model: string; effort: string; mode: string; steps: number; isRunning: boolean }

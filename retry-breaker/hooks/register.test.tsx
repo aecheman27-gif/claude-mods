@@ -95,6 +95,35 @@ describe('streaks', () => {
     expect(w.toasts).toHaveLength(1)
   })
 
+  test('a sleep or a check between retries does not reset the streak', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.failing.add(PORT)
+    await bash($, PORT)
+    await bash($, 'Start-Sleep 2')
+    await bash($, PORT)
+    await bash($, 'Get-PnpDevice -Class Ports')
+    await bash($, 'Start-Sleep 2')
+    expect(w.toasts).toEqual([])
+    await bash($, PORT)
+    expect(w.toasts).toEqual([`retry-breaker: Claude failed the same Bash 3× in a row: ${PORT}`])
+  })
+
+  test('five successes of other calls in a row end the streak and clear its row', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.failing.add(PORT)
+    await times(3, () => bash($, PORT))
+    await times(4, () => bash($, 'git status'))
+    expect(await textOf(await mount($))).toContain('[LOOP]')
+    await bash($, 'git status')
+    expect(await textOf(await mount($))).not.toContain('[LOOP]')
+    await times(2, () => bash($, PORT))
+    expect(w.toasts).toHaveLength(1)
+    await bash($, PORT)
+    expect(w.toasts).toHaveLength(2)
+  })
+
   test('a success clears a shown row; the next streak toasts again', async ($, on) => {
     const w = world(on)
     await start($)

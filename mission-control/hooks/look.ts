@@ -5,6 +5,7 @@ export const C = {
   primary: 'cyan',
   ok: 'green',
   warn: '#FFB000',
+  bad: '#f87171',
   edit: 'magenta',
   dim: 'gray',
 } as const

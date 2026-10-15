@@ -3,12 +3,13 @@ import type { Args, EngineInterface, Register, RenderInput, SessionMessage } fro
 
 import type { Call, Category, Fill, GitInfo, Output } from '../types'
 import { C, look, shortModel } from './look'
-import { bar, estimate, fmt, labelOf, oneLine, tone, toolName, totals } from './meter'
+import { bar, estimate, fmt, isCompactionDrop, labelOf, oneLine, tone, toolName, totals } from './meter'
 
 // A skin: restyles the spinner and tool rows, and draws one status block in
 // the band above the prompt (stacked over other mods' rows, never replacing
 // them), or under flightdeck's session log while that pane is open:
-//   [SYS] repo, branch, model and whether hw-write-guard is loaded
+//   [SYS] repo, branch, model and hw-write-guard's mode (ASK, NOTIFY, OFF; ?
+//         while it has published none; OFF when it is not loaded)
 //   [CTL] model and effort buttons; a press runs /model or /effort as if typed
 //         (where this build has no /effort, the pick is applied to each
 //         main-loop request instead)
@@ -168,16 +169,27 @@ async function isDocked($: EngineInterface) {
   return (held as { value?: unknown } | undefined)?.value === true
 }
 
+// hw-write-guard's mode, which it publishes and keeps per machine. Read while
+// drawing, so a change draws the block again. Undefined while it has published
+// none (an older build, or not loaded) or anything but its three modes.
+const HW_GUARD_MODE = { plugin: 'hw-write-guard', key: 'mode' } as const
+async function guardMode($: EngineInterface): Promise<'ask' | 'notify' | 'off' | undefined> {
+  const held = await $.state.get(HW_GUARD_MODE as never).catch(() => undefined)
+  const value = (held as { value?: unknown } | undefined)?.value
+  return value === 'ask' || value === 'notify' || value === 'off' ? value : undefined
+}
+
 /**
  * [SYS], [CTL] and [CTX], `width` cells across: the band's, or flightdeck's
  * pane's. `hasCtx` false leaves [CTX] out (flightdeck's card shows ctx).
  */
 async function statusBlock($: EngineInterface, e: RenderInput<'AbovePrompt' | 'Pane'>, width: number, hasCtx = true) {
   const { Box, Button, Text } = $.ui.resolve(e)
-  const [g, m, armed, isClean, level, viaCommand, forced, f, isCtx, outs] = await Promise.all([
+  const [g, m, armed, mode, isClean, level, viaCommand, forced, f, isCtx, outs] = await Promise.all([
     read($, git),
     read($, model),
     read($, guard),
+    guardMode($),
     read($, clean),
     read($, effort),
     read($, hasEffortCommand),
@@ -186,6 +198,16 @@ async function statusBlock($: EngineInterface, e: RenderInput<'AbovePrompt' | 'P
     read($, ctxBand),
     read($, outputs),
   ])
+  // No /hw-guard command: not loaded. Loaded: its mode, or ? until it says.
+  const hw = !armed
+    ? { word: 'OFF', color: C.warn }
+    : mode === 'ask'
+      ? { word: 'ASK', color: C.ok }
+      : mode === 'notify'
+        ? { word: 'NOTIFY', color: C.warn }
+        : mode === 'off'
+          ? { word: 'OFF', color: C.bad }
+          : { word: '?', color: C.dim }
 
   const sys = (
     <Box backgroundColor={C.bg} width={width}>
@@ -199,8 +221,8 @@ async function statusBlock($: EngineInterface, e: RenderInput<'AbovePrompt' | 'P
         <Text color="white">{g ? g.branch : 'no git'} </Text>
         <Text color={C.primary}>◆ </Text>
         <Text color="white">{m ? shortModel(m) : '…'} </Text>
-        <Text color={armed ? C.ok : C.warn} bold>
-          [HW-GUARD {armed ? 'ON' : 'OFF'}]
+        <Text color={hw.color} bold>
+          [HW-GUARD {hw.word}]
         </Text>
         {isClean ? <Text color={C.dim}> [CLEAN]</Text> : ''}
       </Text>
@@ -281,6 +303,9 @@ async function statusBlock($: EngineInterface, e: RenderInput<'AbovePrompt' | 'P
 }
 
 export const register: Register = on => {
+  // session.compact rebuilt the outputs for the compaction whose drop the next reading shows.
+  let isCompactHeard = false
+
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'clean', description: 'Toggle mission-control clean view (tool rows as a checklist)' })
     await $.command.register({ name: 'ctx', description: 'Context pane: what fills the window, by tool; "/ctx band" hides or shows the [CTX] row' })
@@ -364,15 +389,26 @@ export const register: Register = on => {
   // A compaction replaces the transcript: rebuild from what it reads as afterwards.
   on('session.compact', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && done.messages) await rebuildOutputs($, done.messages).catch(() => undefined)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && done.messages) {
+      isCompactHeard = true
+      await rebuildOutputs($, done.messages).catch(() => undefined)
+    }
     return done
   }).catch(($, e, next) => next(e))
 
   // The engine measures after each response: the moment the context fill moves.
   // Cheap: the usage reading (and the breakdown while the /ctx pane is open).
+  // Where an organization manages Claude Code, session.compact passes over the
+  // plugins a person installs: a compaction shows here instead, as the fill
+  // falling to under half, and the outputs are rebuilt from the transcript.
   on('session.measure', async ($, e, next) => {
     const ran = await next(e)
-    if (e.changed.includes('context')) await refreshContext($).catch(() => undefined)
+    if (e.changed.includes('context')) {
+      const before = (await read($, fill))?.tokens
+      await refreshContext($).catch(() => undefined)
+      if (!isCompactHeard && isCompactionDrop(before, e.context.tokens)) await rebuildOutputs($).catch(() => undefined)
+      isCompactHeard = false
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
