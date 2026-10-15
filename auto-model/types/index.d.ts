@@ -18,6 +18,8 @@ declare module 'claude-code' {
     'auto-model': {
       /** drawn as the [AUTO] row until the next prompt or Dismiss */
       last: Routed | null
+      /** model family -> clock time of the main loop's last request to it: its prompt cache is warm for an hour after */
+      lastUsed: Record<string, number>
     }
   }
 }

@@ -1,18 +1,22 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { CommandRunInput, On, RenderPropsOf } from 'claude-code'
 
-import { decide, tierOf } from './register'
+import { decide, inputCost, tierOf } from './register'
+
+const HOUR = 3_600_000
+const NOW = 10 * HOUR
 
 type World = {
   toasts: string[]
   steps: { model: string; effort: unknown; agentId?: string }[]
   submitted: string[]
   store: Map<string, unknown>
+  clock: ReturnType<typeof mock.clock>
 }
 
 function world(on: On, opts: { tokens?: number } = {}): World {
-  const w: World = { toasts: [], steps: [], submitted: [], store: new Map() }
+  const w: World = { toasts: [], steps: [], submitted: [], store: new Map(), clock: mock.clock(on, { now: NOW }) }
   on('session.start', async () => ({ cwd: 'C:/work' }) as never)
   on('command.register', async ($, e) => ({ value: { command: e.name } }) as never)
   on('store.get', async ($, e) => ({ value: w.store.get(e.key) }) as never)
@@ -86,14 +90,44 @@ describe('tierOf', () => {
 })
 
 describe('decide', () => {
-  test('switches only to another family, under the limit, never from Fable', async () => {
-    expect(decide('quick', 'claude-opus-5-5', 30_000, 50_000)).toEqual({ family: 'haiku', note: 'haiku instead of opus' })
-    expect(decide('heavy', 'claude-opus-5-5', 30_000, 50_000).family).toBeUndefined()
-    expect(decide('heavy', 'claude-sonnet-5-5', 30_000, 50_000).family).toBe('opus')
-    expect(decide('quick', 'claude-fable-5-1', 0, 50_000)).toEqual({ note: 'kept fable: your own pick' })
-    const held = decide('quick', 'claude-opus-5-5', 120_000, 50_000)
+  const OPUS = 'claude-opus-5-5'
+  const warm = NOW - 10 * 60_000
+  const cold = NOW - 2 * HOUR
+  const cache = (lastUsed: Record<string, number>, tokens = 30_000) => ({ tokens, now: NOW, lastUsed, haikuLimit: 75_000, opusLimit: 50_000 })
+
+  test('input cost per request: warm reads, cold 1-hour writes, Haiku by its own count and tier', async () => {
+    const cents = (n: number) => Math.round(n * 1000) / 10
+    expect(cents(inputCost('opus', 60_000, true))).toBe(1.2)
+    expect(cents(inputCost('haiku', 60_000, false))).toBe(1.6)
+    expect(cents(inputCost('sonnet', 60_000, false))).toBe(24)
+    expect(cents(inputCost('opus', 200_000, true))).toBe(4)
+    expect(cents(inputCost('haiku', 200_000, false))).toBe(26)
+  })
+
+  test('Haiku while it is cheap: under its limit, or its cache is warm, or yours went cold', async () => {
+    const d = decide('quick', OPUS, cache({ opus: warm }))
+    expect(d.family).toBe('haiku')
+    expect(d.note).toContain('under 75k tokens a Haiku re-read costs about what staying does (input ≈ $0.008 vs $0.006 staying)')
+    const held = decide('quick', OPUS, cache({ opus: warm }, 120_000))
     expect(held.family).toBeUndefined()
-    expect(held.note).toContain('past the 50k switch limit')
+    expect(held.note).toContain('kept opus: the context (120k) is past the 75k limit for haiku')
+    expect(decide('quick', OPUS, cache({ opus: warm, haiku: warm }, 120_000)).note).toContain("haiku's cache is still warm")
+    expect(decide('quick', OPUS, cache({ opus: cold }, 120_000)).family).toBe('haiku')
+  })
+
+  test('Sonnet waits while your cache is warm; a new session or a cold cache lets it go', async () => {
+    const held = decide('medium', OPUS, cache({ opus: warm }))
+    expect(held.family).toBeUndefined()
+    expect(held.note).toContain('Sonnet would re-read the chat cold (input ≈ $0.12 vs $0.006 staying)')
+    expect(decide('medium', OPUS, cache({ opus: cold })).note).toContain("opus's cache was cold too")
+    expect(decide('medium', OPUS, cache({})).family).toBe('sonnet')
+  })
+
+  test('Opus from a cheaper session under its limit; Fable and the right fit are kept', async () => {
+    expect(decide('heavy', 'claude-sonnet-5-5', cache({ sonnet: warm })).family).toBe('opus')
+    expect(decide('heavy', 'claude-sonnet-5-5', cache({ sonnet: warm }, 80_000)).family).toBeUndefined()
+    expect(decide('heavy', OPUS, cache({})).note).toBe('kept opus, the right fit')
+    expect(decide('quick', 'claude-fable-5-1', cache({}))).toEqual({ note: 'kept fable: your own pick' })
   })
 })
 
@@ -129,13 +163,31 @@ describe('routing a turn', () => {
     expect(await textOf(await mount($))).not.toContain('[AUTO]')
   })
 
-  test('past the context limit it keeps the session model and says why', async ($, on) => {
+  test('a long chat on a warm Opus cache keeps Opus and says why', async ($, on) => {
     const w = world(on, { tokens: 180_000 })
     await start($)
-    await turn($, 'how many unread emails are in my Gmail right now', 'T1')
+    await turn($, 'fix the failing flightdeck test', 'T1')
+    await w.clock.advance(5 * 60_000)
+    await turn($, 'how many unread emails are in my Gmail right now', 'T2')
     expect(w.steps.every(s => s.model === 'claude-opus-5-5')).toBe(true)
     expect(w.toasts).toEqual([])
-    expect((await run($, 'status')).text).toContain('Last prompt: kept opus: the context (180k) is past the 50k switch limit')
+    const status = (await run($, 'status')).text
+    expect(status).toContain('Caches this session: opus warm (used 0m ago).')
+    expect(status).toContain('Last prompt: kept opus: the context (180k) is past the 75k limit for haiku (input ≈ $0.23 vs $0.036 staying).')
+  })
+
+  test('Sonnet waits while Opus is warm, and goes once an hour idle has let it cool', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, 'fix the failing flightdeck test', 'T1')
+    await turn($, 'explain what the cache-tax mod does', 'T2')
+    expect(w.steps.at(-1)?.model).toBe('claude-opus-5-5')
+    expect(w.toasts).toEqual([])
+    await w.clock.advance(HOUR + 60_000)
+    await turn($, 'explain what the cache-tax mod does', 'T3')
+    expect(w.steps.at(-1)?.model).toBe('claude-sonnet-5-5')
+    expect(w.toasts).toEqual(['auto-model: sonnet for this one ("explain"). /automodel off to stop'])
+    expect((await run($, 'status')).text).toContain("Last prompt: sonnet instead of opus: opus's cache was cold too")
   })
 
   test('subagents, Fable sessions, peers and /automodel off are never rerouted', async ($, on) => {

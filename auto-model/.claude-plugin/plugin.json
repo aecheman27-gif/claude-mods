@@ -1,17 +1,24 @@
 {
   "name": "auto-model",
-  "version": "0.1.0",
-  "description": "Picks the model per prompt with local rules: quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus. Switches only while the context is small, so the prompt cache isn't wasted.",
+  "version": "0.2.0",
+  "description": "Picks the model per prompt with local rules: quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus. The whole conversation always goes along; it switches only when the other model's prompt-cache re-read costs little.",
   "author": {
     "name": "aecheman27-gif"
   },
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
+    "haikuUnderTokens": {
+      "type": "number",
+      "title": "Switch to Haiku under (tokens of context)",
+      "description": "While your model's cache is warm, auto-model sends quick questions to Haiku only under this many tokens. Up to ~75k, Haiku's low price tier makes its cold re-read cost about what staying does.",
+      "default": 75000,
+      "min": 0
+    },
     "switchUnderTokens": {
       "type": "number",
-      "title": "Switch only under (tokens of context)",
-      "description": "auto-model changes the model only while the conversation is under this many tokens. A switch re-reads the whole conversation on the other model's empty cache, which costs more than it saves on a long chat.",
+      "title": "Switch up to Opus under (tokens of context)",
+      "description": "While your model's cache is warm, auto-model moves a heavy prompt up to Opus only under this many tokens: a cold Opus re-read costs $8 per million tokens.",
       "default": 50000,
       "min": 0
     }

@@ -112,7 +112,7 @@
     {
       "name": "auto-model",
       "source": "./auto-model",
-      "description": "Picks the model per prompt with local rules (no model calls): quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus, only while the context is small. [AUTO] row with Redo; /automodel."
+      "description": "Picks the model per prompt with local rules (no model calls): quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus. Switches only when the other model's prompt-cache re-read costs little. [AUTO] row with Redo; /automodel."
     },
     {
       "name": "prompt-upgrade",
