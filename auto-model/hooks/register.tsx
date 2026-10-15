@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Family } from '../types'
+import type { CacheUse, Family } from '../types'
 
 // Picks the model per prompt with local rules, no model calls: quick questions
 // to Haiku, writing and explaining to Sonnet, building and fixing to Opus. It
@@ -9,21 +9,29 @@ import type { Family } from '../types'
 // keeps the person's own pick and subagents keep theirs. A Fable session is the
 // person's deliberate pick and is never rerouted.
 // The conversation always goes whole to the other model; its prompt cache does
-// not (each model keeps its own), so the other model re-reads the chat at the
-// cache-write price. It switches only where that costs little: the other
-// model's cache is still warm, the current one's went cold anyway, Haiku under
-// haikuUnderTokens (its cheap tier), Opus under switchUnderTokens. Sonnet with
-// Opus's cache warm re-reads at ~20x the price of staying, so it waits.
-// $.state, $.store, $.clock, $.session.usage, $.prompt.submit and $.ui only: no
-// files, network, processes or model calls.
+// not (each model keeps its own), so the other model re-reads at the
+// cache-write price whatever its cache lacks: all of the chat when it is cold,
+// what was added since its last use when it is warm. It switches only where
+// that costs little: the other model's cache misses no more of the chat than
+// yours, yours went cold anyway, Haiku under haikuUnderTokens (its cheap tier),
+// Opus re-reading under switchUnderTokens. Sonnet with Opus's cache warm
+// re-reads at ~20x the price of staying, so it waits.
+// Only Anthropic's own model ids are routed (not Bedrock, Vertex or a gateway's
+// names), only on the session's model (a fallback the engine retries on is left
+// alone), and a routed turn that ends in an error or a refusal stops routing
+// for the rest of the session.
+// $.state, $.store, $.clock, $.session (usage, model, turns), $.prompt.submit
+// and $.ui only: no files, network, processes or model calls.
 
 const last = atom({ plugin: 'auto-model', key: 'last' } as const, null)
-// family -> when the main loop last sent it a request this session: its cache is warm for CACHE_MS after
-const lastUsed = atom({ plugin: 'auto-model', key: 'lastUsed' } as const, {})
+// family -> the main loop's last request to it this session: when (its cache is warm for CACHE_MS after) and the context it cached
+const caches = atom({ plugin: 'auto-model', key: 'caches' } as const, {})
 
 export type Tier = 'quick' | 'medium' | 'heavy' | 'keep'
 
 const ID: Record<Family, string> = { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' }
+// the ids ID's are siblings of; a provider's own spelling (Bedrock's us.anthropic.claude-…, Vertex's …@date, a gateway alias) is not rewritten
+const FIRST_PARTY = /^claude-(?:opus|sonnet|haiku|fable)-[0-9][a-z0-9-]*(?:\[\w+\])?$/
 const TARGET: Record<Exclude<Tier, 'keep'>, Family> = { quick: 'haiku', medium: 'sonnet', heavy: 'opus' }
 // a person's prompt: typed, from a phone, or a plugin's button (next-steps); not a peer, a schedule or a notification
 const ROUTED = new Set(['composer', 'bridge', 'plugin'])
@@ -50,6 +58,9 @@ const WRITE_THING =
 const MEDIUM =
   /\b(?:explain|why|summari[sz]e|compare|draft|translate|describe|outline|brainstorm|suggest|recommend|improve|polish|reword|proofread|rephrase)(?:s|es|ed|d|ing)?\b|\bhow (?:do|does|did|would|should|can|could)\b/i
 const QUICK_START = /^(?:what(?:'s|s)?|how (?:many|much|long|old|big)|when|where|who|which|is|are|was|were|does|do|did|has|have|list|show|count|check|tell me|find)\b/i
+// "find the old logs and delete them", "check COM3 and reset the board": a request that changes something, not a question
+const ACTION =
+  /\b(?:delete|remove|reset|restart|reboot|shut ?down|run|send|push|pull|write|flash|kill|stop|start|launch|execute|move|rename|overwrite|upload|deploy|commit|merge|rebase|revert|restore|clean|wipe|erase|purge|drop|truncate|format|install|uninstall|reinstall|upgrade|downgrade|enable|disable|change|set|update|edit|apply|publish|cancel|archive|calibrate|trigger)(?:s|es|ed|d|ing)?\b/i
 
 /** The prompt's tier and the signal that set it. 'keep' runs it on the session's own model. */
 export function tierOf(text: string, hasAttachments = false): { tier: Tier; why: string } {
@@ -61,7 +72,12 @@ export function tierOf(text: string, hasAttachments = false): { tier: Tier; why:
   if (heavy) return { tier: 'heavy', why: `"${heavy[0].toLowerCase()}"` }
   const medium = MEDIUM.exec(t)
   if (medium) return { tier: 'medium', why: `"${medium[0].toLowerCase()}"` }
-  if (t.length <= QUICK_MAX && !t.includes('\n') && (QUICK_START.test(t) || t.endsWith('?'))) return { tier: 'quick', why: 'quick question' }
+  if (t.length <= QUICK_MAX && !t.includes('\n') && (QUICK_START.test(t) || t.endsWith('?'))) {
+    // Haiku would carry it out with every tool: an action stays on the person's own model
+    const action = ACTION.exec(t)
+    if (action) return { tier: 'keep', why: `"${action[0].toLowerCase()}" asks for an action` }
+    return { tier: 'quick', why: 'quick question' }
+  }
   // "yes", "push it", "do the next one": a follow-up carries on the task on the model it was on
   return { tier: 'keep', why: 'follow-up or no clear signal' }
 }
@@ -78,21 +94,24 @@ export function familyOf(model: string): Family | 'fable' | undefined {
 const k = (n: number) => `${Math.round(n / 1000)}k`
 const money = (n: number) => `$${n < 0.1 ? n.toFixed(3) : n.toFixed(2)}`
 
-/** What one request's input costs on `family` over `tokens` of context (counted as Opus counts them), its cache warm or not. */
-export function inputCost(family: Family, tokens: number, isWarm: boolean): number {
+/**
+ * What one request's input costs on `family` over `tokens` of context (counted as Opus counts them):
+ * the `cached` part its warm cache holds at the read price, the rest at the write price.
+ */
+export function inputCost(family: Family, tokens: number, cached: number): number {
   const p = PRICE[family]
-  if (family !== 'haiku') return (tokens / 1e6) * (isWarm ? p.read : p.write)
-  const own = tokens * HAIKU_TOKENS
-  const over = own > HAIKU_TIER
-  return (own / 1e6) * (isWarm ? (over ? p.overRead! : p.read) : over ? p.overWrite! : p.write)
+  const hit = Math.min(cached, tokens)
+  if (family !== 'haiku') return (hit * p.read + (tokens - hit) * p.write) / 1e6
+  const over = tokens * HAIKU_TOKENS > HAIKU_TIER
+  return ((hit * (over ? p.overRead! : p.read) + (tokens - hit) * (over ? p.overWrite! : p.write)) * HAIKU_TOKENS) / 1e6
 }
 
 export type Cache = {
   /** the context now, in tokens; undefined when the engine has no reading */
   tokens?: number
   now: number
-  /** family -> when the main loop last used it */
-  lastUsed: Record<string, number>
+  /** family -> the main loop's last request to it: when, and the context it cached */
+  caches: Record<string, CacheUse>
   haikuLimit: number
   opusLimit: number
 }
@@ -100,27 +119,45 @@ export type Cache = {
 /** Which family a turn runs on (`family` absent: the session's own model) and the line /automodel shows. */
 export function decide(tier: Tier, model: string, c: Cache): { family?: Family; note: string } {
   const base = familyOf(model)
-  if (base === undefined) return { note: `kept ${model}: not a model auto-model knows` }
+  if (base === undefined || !FIRST_PARTY.test(model)) return { note: `kept ${model}: auto-model routes only Anthropic's own model ids (claude-opus-…)` }
   if (base === 'fable') return { note: 'kept fable: your own pick' }
   if (tier === 'keep') return { note: `kept ${base}` }
   const target = TARGET[tier]
   if (target === base) return { note: `kept ${base}, the right fit` }
-  const isWarm = (f: string) => c.now - (c.lastUsed[f] ?? -Infinity) < CACHE_MS
   const tokens = c.tokens ?? 0
-  const baseWarm = isWarm(base)
-  const targetWarm = isWarm(target)
-  const cost = ` (input ≈ ${money(inputCost(target, tokens, targetWarm))} vs ${money(inputCost(base, tokens, baseWarm))} staying)`
+  const isWarm = (f: string) => c.now - (c.caches[f]?.at ?? -Infinity) < CACHE_MS
+  // how much of the chat a warm cache still holds: what its last use cached
+  const held = (f: string) => (isWarm(f) ? Math.min(c.caches[f]?.tokens ?? 0, tokens) : 0)
+  // what each would re-read at the write price: the target by switching, your model by staying
+  const fresh = tokens - held(target)
+  const stale = tokens - held(base)
+  const cost = ` (input ≈ ${money(inputCost(target, tokens, held(target)))} vs ${money(inputCost(base, tokens, held(base)))} staying)`
   const go = (why: string) => ({ family: target, note: `${target} instead of ${base}: ${why}${cost}` })
-  if (targetWarm) return go(`${target}'s cache is still warm`)
-  if (!baseWarm) return go(`${base}'s cache was cold too, so staying would re-read the chat as well`)
+  if (isWarm(target) && fresh <= stale) return go(`${target}'s cache is still warm`)
+  if (!isWarm(base)) return go(`${base}'s cache was cold too, so staying would re-read the chat as well`)
   if (target === 'haiku' && tokens <= c.haikuLimit) return go(`under ${k(c.haikuLimit)} tokens a Haiku re-read costs about what staying does`)
-  if (target === 'opus' && tokens <= c.opusLimit) return go(`under the ${k(c.opusLimit)} switch limit`)
-  if (target === 'sonnet') return { note: `kept ${base}: its cache is warm, and Sonnet would re-read the chat cold${cost}` }
-  const limit = target === 'haiku' ? c.haikuLimit : c.opusLimit
-  return { note: `kept ${base}: the context (${k(tokens)}) is past the ${k(limit)} limit for ${target}${cost}` }
+  if (target === 'opus' && fresh <= c.opusLimit) return go(`under the ${k(c.opusLimit)} switch limit`)
+  const missed = fresh < tokens ? `${k(fresh)} of the chat` : 'the chat'
+  if (target === 'sonnet') return { note: `kept ${base}: its cache is warm, and Sonnet would re-read ${missed} cold${cost}` }
+  if (target === 'haiku') return { note: `kept ${base}: the context (${k(tokens)}) is past the ${k(c.haikuLimit)} limit for haiku${cost}` }
+  return { note: `kept ${base}: opus would re-read ${missed} cold, past the ${k(c.opusLimit)} switch limit${cost}` }
 }
 
-type Plan = { tier: Tier; why: string; text: string; isDecided: boolean; family?: Family; base?: string }
+type Plan = {
+  tier: Tier
+  why: string
+  text: string
+  isDecided: boolean
+  family?: Family
+  base?: string
+  /** the session's model as the turn's first request named it: a later step naming another is a fallback, left alone */
+  model?: string
+  /** the routed model refused a request: the rest of the turn runs as the engine sends it */
+  isRefused?: boolean
+}
+
+/** The model a step is sent to instead of `model`, if the turn is routed and the step is still on the session's model. */
+const routedModel = (plan: Plan | undefined, model: string) => (plan?.family && !plan.isRefused && model === plan.model ? ID[plan.family] : undefined)
 
 const isOff = async ($: EngineInterface) => (await $.store.get('isOff')) === true
 
@@ -130,6 +167,8 @@ export const register: Register = (on, options) => {
   const haikuLimit = setting(options?.haikuUnderTokens, DEFAULT_HAIKU_LIMIT)
   let pending: { tier: Tier; why: string; text: string } | undefined
   let note = 'no prompt seen yet'
+  // why routing stopped for the rest of the session: a switched turn ended in an error or a refusal
+  let halted: string | undefined
   const plans = new Map<string, Plan>()
 
   on('session.start', async ($, e, next) => {
@@ -146,7 +185,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (e.turnId === undefined) {
       void update($, last, () => null).catch(() => undefined)
-      pending = ROUTED.has(e.origin.kind) && !(await isOff($)) ? { ...tierOf(e.text, (e.attachments?.length ?? 0) > 0), text: e.text } : undefined
+      pending = ROUTED.has(e.origin.kind) && !halted && !(await isOff($)) ? { ...tierOf(e.text, (e.attachments?.length ?? 0) > 0), text: e.text } : undefined
     }
     return next(e)
   }).catch(($, e, next) => {
@@ -170,30 +209,43 @@ export const register: Register = (on, options) => {
     const plan = plans.get(e.turnId)
     try {
       const now = await $.clock.now()
+      const tokens = await $.session.usage().then(
+        u => u.context.tokens,
+        () => undefined,
+      )
       if (plan && !plan.isDecided) {
         plan.isDecided = true
-        const tokens = await $.session.usage().then(
-          u => u.context.tokens,
-          () => undefined,
-        )
-        const d = decide(plan.tier, e.model, { tokens, now, lastUsed: await read($, lastUsed), haikuLimit, opusLimit })
-        note = d.note
-        if (d.family) {
-          plan.family = d.family
-          plan.base = familyOf(e.model)
-          void $.ui.toast(`auto-model: ${d.family} for this one (${plan.why}). /automodel off to stop`)
-          void $.ui.status(`auto-model: ${d.family}`)
+        const base = familyOf(e.model)
+        const own = familyOf(await $.session.model().catch(() => ''))
+        if (own !== undefined && base !== own) note = `left ${e.model} alone: a fallback for your ${own}`
+        else {
+          // a resumed chat (or one auto-model joined late) has no record of your model's cache: count it warm from now
+          if (base && (await read($, caches))[base] === undefined && (await $.session.turns().catch(() => 0)) > 1)
+            await update($, caches, all => ({ ...all, [base]: { at: now, tokens: tokens ?? 0 } }))
+          const d = decide(plan.tier, e.model, { tokens, now, caches: await read($, caches), haikuLimit, opusLimit })
+          note = d.note
+          if (d.family) {
+            plan.family = d.family
+            plan.base = base
+            plan.model = e.model
+            void $.ui.toast(`auto-model: ${d.family} for this one (${plan.why}). /automodel off to stop`)
+            void $.ui.status(`auto-model: ${d.family}`)
+          }
         }
       }
-      // the model this request warms
-      const sent = plan?.family ?? familyOf(e.model)
-      if (sent) await update($, lastUsed, all => ({ ...all, [sent]: now }))
+      // the model this request warms, and the context it caches
+      const sent = familyOf(routedModel(plan, e.model) ?? e.model)
+      if (sent) await update($, caches, all => ({ ...all, [sent]: { at: now, tokens: tokens ?? all[sent]?.tokens ?? 0 } }))
     } catch {
       // bookkeeping never holds a request back
     }
-    if (!plan?.family) return yield* next(e)
+    const model = routedModel(plan, e.model)
+    if (!plan || !model) return yield* next(e)
     // the model's own default effort: the session's may be one the other model doesn't take
-    return yield* next({ ...e, model: ID[plan.family], effort: undefined })
+    const r = yield* next({ ...e, model, effort: undefined })
+    // the engine retries a refusal on a fallback model: never force the refused one back
+    if (r.stopReason === 'refusal') plan.isRefused = true
+    return r
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -204,7 +256,11 @@ export const register: Register = (on, options) => {
       const { family } = plan
       if (family) {
         void $.ui.status(undefined)
-        if (!e.isAborted) await update($, last, () => ({ family, base: plan.base ?? 'your model', why: plan.why, text: plan.text }))
+        if (e.reason === 'error' || e.reason === 'refusal') {
+          // the model may be closed to this account or provider: no more switching this session
+          halted = `a turn on ${family} ended with ${e.reason === 'error' ? 'an API error' : 'a refusal'}`
+          void $.ui.toast(`auto-model: ${halted}, so every prompt runs on your own model for the rest of this session. /automodel status`)
+        } else if (!e.isAborted) await update($, last, () => ({ family, base: plan.base ?? 'your model', why: plan.why, text: plan.text }))
       }
     }
     return done
@@ -219,22 +275,25 @@ export const register: Register = (on, options) => {
     }
     if (verb === 'on') {
       await $.store.set('isOff', false)
+      halted = undefined
       return {
         text: 'auto-model is on: quick questions go to Haiku, writing and explaining to Sonnet, building and fixing to Opus, when the switch costs little. /automodel status says when.',
       }
     }
     if (verb !== 'status') return { text: 'Usage: /automodel [status | on | off]' }
     const now = await $.clock.now()
-    const caches = Object.entries(await read($, lastUsed))
-      .sort((a, b) => b[1] - a[1])
-      .map(([f, at]) => (now - at < CACHE_MS ? `${f} warm (used ${Math.round((now - at) / 60_000)}m ago)` : `${f} cold`))
+    const used = Object.entries(await read($, caches))
+      .sort((a, b) => b[1].at - a[1].at)
+      .map(([f, u]) => (now - u.at < CACHE_MS ? `${f} warm (${k(u.tokens)}, used ${Math.round((now - u.at) / 60_000)}m ago)` : `${f} cold`))
+    const state = (await isOff($)) ? 'off' : halted ? `paused for the rest of this session: ${halted} (/automodel on resumes)` : 'on'
     return {
       text: [
-        `auto-model: ${(await isOff($)) ? 'off' : 'on'}. The conversation always goes whole to the other model; its prompt cache doesn't, so it switches only when that costs little:`,
-        `  the other model's cache is still warm, or yours went cold anyway (new session, or ${CACHE_MS / 3_600_000}h+ idle);`,
-        `  Haiku under ${k(haikuLimit)} tokens (haikuUnderTokens in /config), Opus under ${k(opusLimit)} (switchUnderTokens);`,
+        `auto-model: ${state}. The conversation always goes whole to the other model; its prompt cache doesn't, so it switches only when that costs little:`,
+        `  the other model's cache misses no more of the chat than yours (a cache holds the chat as of its last use, for ${CACHE_MS / 3_600_000}h), or yours went cold anyway (new session, or ${CACHE_MS / 3_600_000}h+ idle; a resumed chat counts as warm);`,
+        `  Haiku under ${k(haikuLimit)} tokens (haikuUnderTokens in /config), Opus when it would re-read under ${k(opusLimit)} cold (switchUnderTokens);`,
         '  Sonnet only when your model\'s cache is cold: a cold Sonnet re-read costs ~20x a warm Opus one.',
-        `Caches this session: ${caches.length > 0 ? caches.join(', ') : 'none used yet'}.`,
+        "  Only Anthropic's own model ids, only on your session's model (a fallback is left alone); an error or refusal on a switched turn pauses it.",
+        `Caches this session: ${used.length > 0 ? used.join(', ') : 'none used yet'}.`,
         `Last prompt: ${note}.`,
       ].join('\n'),
     }
@@ -248,7 +307,7 @@ export const register: Register = (on, options) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const redo = () => {
       void update($, last, () => null)
-      void $.prompt.submit({ text: r.text })
+      void $.prompt.submit({ text: r.text, asUser: true })
     }
     return (
       <Box flexDirection="column">

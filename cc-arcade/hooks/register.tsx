@@ -29,6 +29,8 @@ const NAMES = ['snake', 'tetris', 'doom', '2048', 'minesweeper', 'flappy', 'pong
 // random never lands on the pet: it is not a game you play
 const PLAYABLE = NAMES.filter(n => n !== 'pet')
 const PICKER = 'picker'
+// rows a board leaves under it for the other mods' rows in the band
+const OTHER_ROWS = 4
 const isGame = (name: unknown): name is string => typeof name === 'string' && Object.hasOwn(GAMES, name)
 
 // a game name, PICKER, or nothing open
@@ -42,7 +44,9 @@ const best: Record<string, number> = {}
 let safe = false
 let pet: Pet | undefined
 
-const isPet = (value: unknown): value is Pet => typeof value === 'object' && value !== null && typeof (value as Pet).xp === 'number'
+// every number the pet is drawn and fed from: a pet stored with one broken (an older build wrote `{}`) hatches anew
+const isPet = (value: unknown): value is Pet =>
+  typeof value === 'object' && value !== null && [(value as Pet).xp, (value as Pet).mood, (value as Pet).at, (value as Pet).born].every(Number.isFinite)
 const autoContext = (now: number): AutoContext => ({
   working: turnStartedAt !== undefined,
   turnMs: turnStartedAt === undefined ? 0 : now - turnStartedAt,
@@ -58,7 +62,7 @@ export const register: Register = on => {
     // an unhandled rejection here would unmount the whole module
     const stored = (key: string) => $.store.get(key).catch(err => { $.ui.log(`cc-arcade: store read failed: ${err}`); return undefined })
     const saved = await stored('pet')
-    pet = isPet(saved) ? saved : newPet($.clock.now())
+    pet = isPet(saved) ? saved : newPet(await $.clock.now())
     if (!isPet(saved)) await $.store.set('pet', pet).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
     for (const name of NAMES) {
       const score = Number(await stored(`best:${name}`))
@@ -109,7 +113,7 @@ export const register: Register = on => {
     }
     if (arg === 'random') return open(pickRandom(PLAYABLE, lastGame))
     if (arg === 'auto') {
-      const pick = pickAuto(autoContext($.clock.now()))
+      const pick = pickAuto(autoContext(await $.clock.now()))
       return open(pick.game, `auto: ${pick.reason}`)
     }
     if (isGame(arg)) return open(arg)
@@ -117,11 +121,13 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    turnStartedAt = $.clock.now()
+    turnStartedAt = await $.clock.now()
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
+    // a subagent finishing is not Claude finishing: the main turn runs on
+    if (e.agentId) return next(e)
     const r = await next(e)
     turnStartedAt = undefined
     if (active && active !== PICKER) {
@@ -139,8 +145,9 @@ export const register: Register = on => {
     const event = petEvent(e.tool, typeof command === 'string' ? command : undefined, 'deny' in r ? undefined : !r.isError)
     if (!event) return r
     const saved = await $.store.get('pet').catch(() => undefined)
-    const current = isPet(saved) ? saved : pet ?? newPet($.clock.now())
-    const fed = feed(current, event, $.clock.now())
+    const now = await $.clock.now()
+    const current = isPet(saved) ? saved : pet ?? newPet(now)
+    const fed = feed(current, event, now)
     pet = fed
     await $.store.set('pet', fed).catch(err => $.ui.log(`cc-arcade: store write failed: ${err}`))
     if (level(fed.xp) > level(current.xp)) {
@@ -173,11 +180,12 @@ export const register: Register = on => {
 
     if (active === PICKER) {
       // no hotkeys: a band hotkey would press on a digit typed as the first character of a prompt
-      const choose = (name: string) => {
+      const choose = async (name: string) => {
         if (name === 'close') active = undefined
         else if (name === 'random') active = pickRandom(PLAYABLE, lastGame)
         else if (name === 'auto') {
-          const pick = pickAuto(autoContext($.clock.now()))
+          // the time of the click, not of the drawing
+          const pick = pickAuto(autoContext(await $.clock.now()))
           active = pick.game
           $.ui.toast(`auto: ${pick.game}, ${pick.reason}`)
         } else active = name
@@ -189,7 +197,7 @@ export const register: Register = on => {
           <Text dimColor>{'arcade · click a game · /arcade <game> works too · /arcade stop closes'}</Text>
           <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
             {[...NAMES, 'random', 'auto', 'close'].map(name => (
-              <Button key={`pick:${name}`} label={name} onPress={() => choose(name)} />
+              <Button key={`pick:${name}`} label={name} onPress={() => void choose(name)} />
             ))}
           </Box>
           {await next(e)}
@@ -197,11 +205,13 @@ export const register: Register = on => {
       )
     }
 
-    const cols = e.viewport?.columns ?? 80
-    // one row for the back and close buttons, one for whatever else draws in the band
-    const rows = Math.max(8, e.props.maxRows - 2)
+    // the band's own width, which leaves out its [-] and a docked pane
+    const cols = e.props.bodyColumns
+    // one row for the back and close buttons, OTHER_ROWS for whatever else draws in the band
+    const rows = Math.max(8, e.props.maxRows - 1 - OTHER_ROWS)
     const tall = (max: number) => Math.min(rows, max)
     const props = { best: best[active] ?? 0, done: turnsDone, safe }
+    const now = await $.clock.now()
     // the key names the board, so switching mounts a fresh one and a redraw keeps the running one;
     // module paths must be string literals, since the engine reads them off this source
     const key = `board:${active}`
@@ -215,7 +225,7 @@ export const register: Register = on => {
       : active === 'invaders' ? <Client key={key} module="./boards/invaders.tsx" width={cols} height={tall(19)} props={props} />
       // doom is a view, not a board: it takes every row and column the band gives it
       : active === 'doom' ? <Client key={key} module="./boards/doom.tsx" width={cols} height={rows} props={props} />
-      : active === 'pet' ? <Client key={key} module="./boards/pet.tsx" width={cols} props={{ pet, now: $.clock.now() }} />
+      : active === 'pet' ? <Client key={key} module="./boards/pet.tsx" width={cols} props={{ pet, now }} />
       : <Client key={key} module="./boards/typing.tsx" width={cols} props={props} />
     // back to the picker, or close; click-only like the picker (no hotkeys: a band hotkey would press
     // on a digit typed as the first character of a prompt)

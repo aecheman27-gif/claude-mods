@@ -7,10 +7,11 @@ import { stepsFrom } from './register'
 const TOOL = 'mcp__next-steps__next_steps'
 
 function world(on: On) {
-  const w = { sent: [] as { text: string; asUser?: boolean }[], tools: [] as string[] }
+  const w = { sent: [] as { text: string; asUser?: boolean }[], tools: [] as string[], deferred: [] as unknown[] }
   on('session.start', async () => ({ cwd: 'C:/work' }) as never)
   on('tool.register', async ($, e) => {
     w.tools.push(e.name)
+    w.deferred.push(e.isDeferred)
     return { value: undefined } as never
   })
   on('prompt.submit', async ($, e) => {
@@ -41,6 +42,8 @@ describe('card', () => {
       const w = world(on)
       await start($)
       expect(w.tools).toEqual(['next_steps'])
+      // in the prompt's tool list, not behind ToolSearch
+      expect(w.deferred).toEqual([false])
       const r = await offer($, STEPS)
       expect(JSON.stringify(r)).toContain('shown: 2 buttons')
       const ui = await $.ui.mount({ plugin: 'next-steps', surface, component: 'AbovePrompt', props: band() })
@@ -49,6 +52,9 @@ describe('card', () => {
       expect(text).toContain('What next?')
       expect(text).toContain('Run tests')
       expect(text).toContain('Commit')
+      // every button shows the whole prompt a click sends
+      expect(text).toContain('Run the tests and fix any failures')
+      expect(text).toContain('Commit these changes')
       expect(text.indexOf('[NEXT]')).toBeLessThan(text.indexOf('OTHER-MOD-ROW'))
       await ui.press({ key: 'step-1' })
       expect(w.sent).toEqual([{ text: 'Commit these changes', asUser: true }])
@@ -91,7 +97,7 @@ describe('card', () => {
     await start($)
     const withTool = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: ['Bash', TOOL], outputStyle: null, traits: [] } as never)
     expect(withTool.sections.map(s => s.id)).toEqual(['intro', 'next-steps:hint'])
-    expect(withTool.sections[1].scope).toBe('session')
+    expect(withTool.sections[1]?.scope).toBe('session')
     const without = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: ['Bash'], outputStyle: null, traits: [] } as never)
     expect(without.sections.map(s => s.id)).toEqual(['intro'])
   })
@@ -102,9 +108,13 @@ describe('steps', () => {
     const many = Array.from({ length: 6 }, (_, i) => ({ label: `  step\n${i}  `, prompt: `do ${i}` }))
     const s = stepsFrom({ steps: many })
     expect(Array.isArray(s) && s.length).toBe(4)
-    expect(Array.isArray(s) && s[0].label).toBe('step 0')
+    expect(Array.isArray(s) && s[0]?.label).toBe('step 0')
     expect(stepsFrom({ steps: [{ label: 'x'.repeat(60), prompt: 'p' }] })).toEqual([{ label: 'x'.repeat(39) + '…', prompt: 'p' }])
     expect(stepsFrom({ steps: [{ label: 'no prompt' }] })).toBe('each step needs a label and a prompt')
+    // a prompt is shown whole beside its button: one too long to read is refused, never cut
+    expect(stepsFrom({ steps: [{ label: 'Go', prompt: 'x'.repeat(201) }] })).toBe('each prompt must be at most 200 characters: it is shown in full beside its button')
+    // what is shown is what is sent: no control, zero-width or direction characters to hide words
+    expect(stepsFrom({ steps: [{ label: 'Go', prompt: ' run\n the\u001b[8m tests\u202e now\u200b ' }] })).toEqual([{ label: 'Go', prompt: 'run the [8m tests now' }])
     expect(stepsFrom({})).toBe('steps must be a non-empty list')
   })
 })

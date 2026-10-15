@@ -1,6 +1,14 @@
 /** A model family auto-model routes to. */
 export type Family = 'haiku' | 'sonnet' | 'opus'
 
+/** A model family's prompt cache as the main loop last left it. */
+export type CacheUse = {
+  /** clock time of the main loop's last request to it: its cache is warm for an hour after */
+  at: number
+  /** the context then, in tokens: what that cache holds */
+  tokens: number
+}
+
 /** The last turn auto-model answered on another model than the session's own. */
 export type Routed = {
   /** who answered */
@@ -18,8 +26,8 @@ declare module 'claude-code' {
     'auto-model': {
       /** drawn as the [AUTO] row until the next prompt or Dismiss */
       last: Routed | null
-      /** model family -> clock time of the main loop's last request to it: its prompt cache is warm for an hour after */
-      lastUsed: Record<string, number>
+      /** model family -> its prompt cache as the main loop's last request to it left it */
+      caches: Record<string, CacheUse>
     }
   }
 }

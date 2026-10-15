@@ -1,6 +1,6 @@
 {
   "name": "prompt-upgrade",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "/improve <prompt>: a pane asks 2-4 clickable questions about what you want, then writes a fuller prompt you can run, edit or copy. Two small model calls per upgrade, only when you ask.",
   "author": {
     "name": "aecheman27-gif"

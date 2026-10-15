@@ -21,7 +21,7 @@ type World = {
   replies: unknown[]
   opened: string[]
   closed: string[]
-  submitted: string[]
+  submitted: { text: string; asUser?: boolean }[]
   filled: string[]
   copied: string[]
   toasts: string[]
@@ -44,7 +44,7 @@ function world(on: On, replies: unknown[]): World {
     return { value: undefined } as never
   })
   on('prompt.submit', async ($, e) => {
-    w.submitted.push(e.text)
+    w.submitted.push({ text: e.text, asUser: (e.origin as { asUser?: boolean }).asUser })
     return { text: e.text } as never
   })
   on('prompt.fill', async ($, e) => {
@@ -64,6 +64,10 @@ function world(on: On, replies: unknown[]): World {
       { role: 'user', text: 'plan a birthday party for my kid', toolUses: [] },
       { role: 'assistant', text: 'Sure.', toolUses: [] },
       { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'x', text: 'ok' }] },
+      // rows in the person's role they never typed
+      { role: 'user', text: '<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>', toolUses: [] },
+      { role: 'user', text: '<system-reminder>The date changed.</system-reminder>', toolUses: [] },
+      { role: 'user', text: '[Request interrupted by user]', toolUses: [] },
     ],
   }) as never)
   return w
@@ -135,7 +139,8 @@ describe('the pane', () => {
     await ui.press({ key: 'run' })
     for (let i = 0; i < 50 && w.submitted.length === 0; i++) await new Promise<void>(r => setTimeout(r, 5))
     expect(w.closed).toEqual(['prompt-upgrade'])
-    expect(w.submitted).toEqual([UPGRADED])
+    // the person read it in the pane: it runs as their own prompt
+    expect(w.submitted).toEqual([{ text: UPGRADED, asUser: true }])
   })
 
   test('a specific prompt goes straight to the rewrite; Edit first fills the box; Copy copies', async ($, on) => {

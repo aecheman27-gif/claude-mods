@@ -5,19 +5,26 @@ import type { CommandRunInput, On, RenderPropsOf } from 'claude-code'
 import type { Day } from '../types'
 import { dayKey, dayOf, kindOf, mainKind, summarize } from './register'
 
+declare function setTimeout(fn: () => void, ms: number): unknown
+
 const NOW = new Date(2026, 9, 14, 15, 0).getTime() // 14 Oct 2026, 3pm local
 const TODAY = '2026-10-14'
 const USAGE = (model: string) => ({ model, input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0 })
 const day = (tasks: number, extra: Partial<Day> = {}): Day => ({ ...dayOf(undefined), tasks, ...extra })
 
-type World = { store: Map<string, unknown>; usd: number; opened: string[] }
+type World = { store: Map<string, unknown>; usd: number; opened: string[]; slowReads: boolean }
 
 function world(on: On): World {
   mock.clock(on, { now: NOW })
-  const w: World = { store: new Map(), usd: 1, opened: [] }
+  const w: World = { store: new Map(), usd: 1, opened: [], slowReads: false }
   on('session.start', async () => ({ cwd: 'C:/work' }) as never)
   on('command.register', async ($, e) => ({ value: { command: e.name } }) as never)
-  on('store.get', async ($, e) => ({ value: w.store.get(e.key) }) as never)
+  on('store.get', async ($, e) => {
+    const value = w.store.get(e.key)
+    // a read that takes a while to come back, as a file's does: another write can land meanwhile
+    if (w.slowReads) await new Promise<void>(r => setTimeout(r, 20))
+    return { value } as never
+  })
   on('store.set', async ($, e) => {
     w.store.set(e.key, e.value)
     return { value: undefined } as never
@@ -116,6 +123,22 @@ describe('recording', () => {
     expect(d.models).toEqual({ opus: 1, haiku: 1 })
     // 4 turns' usage: T1, the subagent, T2, T3
     expect([d.tokensIn, d.cachedIn, d.tokensOut]).toEqual([40_000, 36_000, 2000])
+  })
+})
+
+describe('finishing together', () => {
+  test('a subagent and the main turn ending at once both count: neither write is lost', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await $.turn.start({ text: 'go', turnId: 'T1' })
+    w.slowReads = true
+    await Promise.all([
+      $.turn.complete({ reason: 'answer', isAborted: false, turnId: 'S1', agentId: 'agent-1', answer: 'report', durationMs: 5000, usage: USAGE('claude-haiku-5-5') } as never),
+      $.turn.complete({ reason: 'answer', isAborted: false, turnId: 'T1', answer: 'done', durationMs: 60_000, usage: USAGE('claude-opus-5-5') } as never),
+    ])
+    const d = dayOf(w.store.get(`day:${TODAY}`))
+    expect(d.tasks).toBe(1)
+    expect(d.tokensOut).toBe(1000)
   })
 })
 

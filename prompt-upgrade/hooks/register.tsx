@@ -79,14 +79,19 @@ export function cleanReply(text: string): string {
 const reasonOf = (r: Exclude<ModelCompleteResult, { isAnswered: true }>) =>
   r.reason === 'api-error' ? `the API answered with an error${r.status ? ` (${r.status})` : ''}` : r.reason === 'empty-reply' ? 'the model replied with nothing' : 'it was cancelled'
 
-/** The person's last prompt in this session, skipping tool results and slash commands. */
+// a user row the person never typed: a task notification, a reminder, a command's echo (<task-notification>,
+// <system-reminder>, <local-command-stdout>: the engine's tags are hyphenated), an interrupt marker. A
+// SessionMessage carries no origin, so its text is all there is to tell by.
+const NOT_TYPED = /^(?:<[a-z]+(?:-[a-z]+)+[\s>]|\[Request interrupted)/i
+
+/** The person's last prompt in this session, skipping tool results, slash commands and rows they never typed. */
 async function lastPrompt($: EngineInterface): Promise<string> {
   const messages = await $.session.messages()
   if (!Array.isArray(messages)) return ''
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     const t = m?.text.trim() ?? ''
-    if (m?.role === 'user' && t && !(m.toolResults?.length ?? 0) && !t.startsWith('/') && !t.includes('<command-')) return t
+    if (m?.role === 'user' && t && !(m.toolResults?.length ?? 0) && !t.startsWith('/') && !t.includes('<command-') && !NOT_TYPED.test(t)) return t
   }
   return ''
 }
@@ -280,7 +285,8 @@ export const register: Register = (on, options) => {
             variant="primary"
             onPress={() => {
               const text = v.upgraded
-              void close($).then(() => $.prompt.submit({ text }))
+              // the person just read it in the pane: it runs as their own prompt, not one the plugin sent
+              void close($).then(() => $.prompt.submit({ text, asUser: true }))
             }}
           />
           <Button

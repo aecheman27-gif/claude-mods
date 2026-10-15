@@ -1,6 +1,6 @@
 {
   "name": "auto-model",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Picks the model per prompt with local rules: quick questions to Haiku, writing and explaining to Sonnet, building and fixing to Opus. The whole conversation always goes along; it switches only when the other model's prompt-cache re-read costs little.",
   "author": {
     "name": "aecheman27-gif"
@@ -18,7 +18,7 @@
     "switchUnderTokens": {
       "type": "number",
       "title": "Switch up to Opus under (tokens of context)",
-      "description": "While your model's cache is warm, auto-model moves a heavy prompt up to Opus only under this many tokens: a cold Opus re-read costs $8 per million tokens.",
+      "description": "While your model's cache is warm, auto-model moves a heavy prompt up to Opus only when Opus would re-read fewer than this many tokens cold (the whole chat, or what was added since it last ran within the hour): a cold Opus re-read costs $8 per million tokens.",
       "default": 50000,
       "min": 0
     }

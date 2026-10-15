@@ -1,6 +1,6 @@
 {
   "name": "todays-report",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "/report: tasks Claude finished today, this week, month or year, the time it worked, what the work was, which models did it, the API-equivalent cost, your streak, and an estimate of time saved at a rate you set. Counted locally, no model calls.",
   "author": {
     "name": "aecheman27-gif"

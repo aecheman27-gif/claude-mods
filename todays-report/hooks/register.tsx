@@ -149,10 +149,18 @@ async function usdNow($: EngineInterface): Promise<number> {
   )
 }
 
-/** Adds to one day's stored totals. */
-async function record($: EngineInterface, at: number, change: (d: Day) => Day) {
+// One read-modify-write of a day at a time in this session: a subagent and the main turn ending together
+// would otherwise both read the day before either wrote it, and one's counts would be lost. Two sessions
+// ending a turn in the same instant can still lose one task's tally: the store has no compare-and-set,
+// and per-session keys would grow it without bound; for a local estimate, that rare loss is accepted.
+let recording: Promise<void> = Promise.resolve()
+
+/** Adds to one day's stored totals, after any add already under way. */
+function record($: EngineInterface, at: number, change: (d: Day) => Day): Promise<void> {
   const key = `day:${dayKey(at)}`
-  await $.store.set(key, change(dayOf(await $.store.get(key))))
+  const done = recording.then(async () => $.store.set(key, change(dayOf(await $.store.get(key)))))
+  recording = done.catch(() => undefined)
+  return done
 }
 
 async function stored($: EngineInterface): Promise<Record<string, Day>> {

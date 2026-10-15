@@ -1,7 +1,7 @@
 {
   "name": "next-steps",
-  "version": "0.1.0",
-  "description": "At the end of a turn Claude offers 2-4 follow-ups as buttons above the prompt; a click sends that one. Gone as soon as you type something else.",
+  "version": "0.2.0",
+  "description": "At the end of a turn Claude offers 2-4 follow-ups as buttons above the prompt, each showing the whole prompt it sends; a click sends that one. Gone as soon as you type something else.",
   "author": {
     "name": "aecheman27-gif"
   },
