@@ -87,8 +87,8 @@ Step 3 - Adversarial review (read-only, before installing anything)
 - Run `claude plugin validate` on the marketplace and on each mod, and
   `claude plugin test $HOME\src\claude-mods\<mod>` for each (it takes the
   mod's folder). Known: cc-arcade's tests use bun:test, which plugin test
-  doesn't run, and filetree has one failing layout test; those two alone are
-  no reason to skip a mod.
+  doesn't run; that alone is no reason to skip it. Every other mod's tests
+  should pass.
 - Check for clashes with what's already installed: other copies of any of
   these mods from other marketplaces, and token-weather. Only one copy of a
   mod name loads its hooks, so an enabled copy from elsewhere could run

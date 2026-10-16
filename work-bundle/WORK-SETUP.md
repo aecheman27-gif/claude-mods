@@ -36,9 +36,7 @@ What it checks:
 - Every mod name is checked before anything changes: an unknown mod, `-Disable reflect-mod`, or one mod in both lists stops the script.
 - It warns when Claude Code is outside 2.1.295–2.1.301.
 - A failing test in one of this marketplace's own mods (not vendored) stops the install.
-- A failing test in a vendored mod is only a warning. Two vendored mods are known to fail here, the same as at home:
-  - cc-arcade's tests use `bun:test`, which `claude plugin test` doesn't run.
-  - filetree has one layout test that fails.
+- A failing test in a vendored mod is only a warning. One vendored mod is known to fail here, the same as at home: cc-arcade's tests use `bun:test`, which `claude plugin test` doesn't run.
 - If `my-claude-mods` is already registered at a different folder, the script stops and tells you how to remove it.
 
 The script stops at the first failure. When it finishes, restart Claude Code (`/exit`, then `claude --continue`). `/reload-plugins` is documented to load them too, but it can be held back by a prompt-cache warning until rerun with `--force`, and at home an update only took effect after a restart. Then check the Errors tab in `/plugin` for "Its hooks module does not load".
